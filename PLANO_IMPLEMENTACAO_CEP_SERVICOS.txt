@@ -1,0 +1,130 @@
+=====================================================================
+GeoSampa - PLANO DE IMPLEMENTACAO
+Modulo: CEP + Coordenadas + Servicos Proximos + Mapas + Analises
+=====================================================================
+
+OBJETIVO
+--------
+Adicionar ao projeto GeoSampa um conjunto de funcionalidades para:
+  1. Ler um CEP, obter a coordenada geografica (latitude/longitude) do
+     CEP e verificar se uma coordenada informada confere com o CEP.
+  2. Dado um CEP (ou coordenada), verificar quais servicos/equipamentos
+     publicos estao proximos (por raio e/ou pelos N mais proximos).
+  3. Avaliar e oferecer diferentes tipos de distancia (geodesica,
+     euclidiana/UTM, haversine, manhattan e, opcionalmente, rede viaria).
+  4. Gerar mapas com o ponto do CEP e os servicos proximos encontrados
+     (mapa estatico em ggplot2 e mapa interativo em leaflet).
+  5. Oferecer analises estatisticas e espaciais a partir dos resultados
+     (descritivas, vizinho mais proximo, Voronoi, KDE, raios progressivos,
+     autocorrelacao espacial Moran's I e distancias por rede viaria OSRM),
+     com o tipo de analise escolhido pelo usuario.
+
+---------------------------------------------------------------------
+ARQUIVOS NOVOS (pasta R/)
+---------------------------------------------------------------------
+1. R/gs_indice_cep.R
+   - Constroi um indice local CEP -> coordenadas varrendo os arquivos
+     CSV ja baixados em data/ (colunas cd_cep_equipamento,
+     latitude e longitude).
+   - Mantem todas as ocorrencias por CEP (um CEP pode corresponder a
+     varios enderecos/coordenadas) e calcula uma coordenada
+     representante (mediana).
+   - Funcao: gs_indice_cep(force = FALSE) -> data.frame com CEP, lat,
+     lon, n_ocorrencias e flag de representante (mediana).
+
+2. R/gs_cep.R
+   - gs_ler_cep(cep): normaliza o CEP (8 digitos) e valida via servico
+     publico viaCEP (https://viacep.com.br), retornando endereco,
+     bairro, cidade, UF e codigo IBGE.
+   - gs_cep_para_coordenadas(cep, fonte = c("local", "nominatim")):
+     cascata de geocodificacao:
+       1. Indice local (offline, rapido, gratuito);
+       2. Nominatim/OpenStreetMap (busca por postalcode, com User-Agent
+          e pausa de 1 segundo, respeitando a politica de uso).
+     Retorna latitude, longitude, fonte usada e precisao/aviso.
+   - gs_verificar_cep(cep, latitude, longitude, tolerancia_m = 300):
+     compara a coordenada informada com a coordenada de referencia do
+     CEP, calcula a distancia e devolve um veredito (confere / nao
+     confere / sem dado suficiente).
+
+3. R/gs_proximidade.R
+   - gs_servicos_proximos(cep | coordenadas, camadas, raio_m,
+     n_por_camada, tipo_distancia = c("geodesica", "euclidiana",
+     "haversine", "manhattan")):
+     - Le os dados locais de data/ (CSV com lat/long ou GeoJSON);
+     - Calcula a distancia entre o ponto de interesse e cada
+       equipamento das camadas escolhidas;
+     - Filtra por raio e/ou limita aos N mais proximos por camada;
+     - Retorna tabela ordenada com nome, tipo, endereco, bairro e
+       distancia.
+   - gs_tipos_distancia(): documenta/lista os tipos de distancia
+     disponiveis e quando usar cada um.
+
+4. R/gs_mapa.R
+   - gs_mapa_servicos(resultado_proximidade | coordenadas + camadas,
+     interativo = TRUE/FALSE, salvar = NULL):
+     - Mapa estatico com ggplot2 (ponto do CEP, circulo/buffer do raio,
+       servicos coloridos por tipo) -> PNG/PDF via ggsave;
+     - Mapa interativo com leaflet (popups com nome e distancia,
+       agrupamento por tipo) -> HTML via htmlwidgets::saveWidget.
+
+5. R/gs_analise.R
+   - gs_analise_servicos(..., tipo = c("descritivas",
+     "vizinho_mais_proximo", "voronoi", "kde", "raios_progressivos",
+     "moran", "rede_viaria")):
+     - descritivas: numero de servicos por tipo dentro do raio,
+       histograma e boxplot das distancias;
+     - vizinho_mais_proximo: distancia ao servico mais proximo
+       (por camada e geral);
+     - voronoi: poligonos de Thiessen (areas de influencia) via
+       sf::st_voronoi;
+     - kde: densidade de kernel dos servicos (ggplot2);
+     - raios_progressivos: oportunidades acumuladas em 500 m, 1 km e
+       2 km;
+     - moran: autocorrelacao espacial (Moran's I) - requer pacote spdep
+       (instalado sob demanda, com mensagem orientativa);
+     - rede_viaria: distancia/tempo de percurso via OSRM - requer
+       pacote osrm (instalado sob demanda; usa servidor demo com
+       aviso de cobertura/limites).
+     - Aceita multiplos tipos; devolve lista nomeada de resultados.
+
+---------------------------------------------------------------------
+ARQUIVOS ALTERADOS
+---------------------------------------------------------------------
+- R/00_config.R
+  - Adiciona gs_urls$viacep e gs_urls$nominatim;
+  - Adiciona constantes: gs_tolerancia_cep_m (300) e
+    gs_pausa_nominatim_s (1).
+- README.md e DOCUMENTACAO.md
+  - Nova secao com as funcoes do modulo, exemplos de uso, tabela de
+    tipos de distancia e lista de analises disponiveis.
+
+---------------------------------------------------------------------
+DEPENDENCIAS
+---------------------------------------------------------------------
+- Obrigatorias (ja instaladas): httr, jsonlite, sf, readr, xml2,
+  ggplot2, leaflet, htmlwidgets.
+- Obrigatorias novas: NENHUMA.
+- Opcionais (sob demanda do usuario): spdep (Moran's I),
+  osrm (rede viaria).
+
+---------------------------------------------------------------------
+TESTES DE ACEITACAO
+---------------------------------------------------------------------
+- CEP conhecido no indice local (ex.: 03175-001 - UBS Agua Rasa):
+  gs_cep_para_coordenadas deve retornar a coordenada do indice local
+  e gs_verificar_cep deve confirmar a coordenada da UBS.
+- CEP valido fora do indice local: deve usar viaCEP + Nominatim.
+- CEP inexistente: deve retornar erro/aviso claro.
+- gs_servicos_proximos com raio de 2 km a partir da UBS deve retornar
+  outros equipamentos com distancia em metros.
+- Mapas estatico (PNG) e interativo (HTML) devem ser gerados sem erro.
+- Analises basicas devem rodar sem dependencias extras; moran e
+  rede_viaria devem avisar quando o pacote necessario nao estiver
+  instalado.
+
+---------------------------------------------------------------------
+ENTREGA
+---------------------------------------------------------------------
+- Commit na branch da implementacao seguindo Conventional Commits
+  (feat(geosampa): ...) e push para o repositório remoto.

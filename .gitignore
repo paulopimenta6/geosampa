@@ -1,0 +1,6 @@
+# Dados baixados — podem ser regenerados com scripts/baixar_tudo.R
+data/
+
+# Saídas geradas pelas análises e relatórios
+saidas/
+relatorios/
