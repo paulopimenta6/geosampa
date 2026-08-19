@@ -12,20 +12,24 @@
 # ============================================================
 
 # 1) Carrega as funções do projeto -------------------------------------------
-pkg <- c("httr", "jsonlite", "sf", "readr", "xml2")
-faltando <- pkg[!vapply(pkg, requireNamespace, logical(1), quietly = TRUE)]
-if (length(faltando) > 0) {
-  stop("Faltam pacotes R: ", paste(faltando, collapse = ", "),
-       ". Instale com install.packages(c('", paste(faltando, collapse = "','"), "'))")
-}
-
-invisible(lapply(list.files(file.path("R"), full.names = TRUE, pattern = "\\.R$"), source))
+arquivo <- grep("^--file=", commandArgs(trailingOnly = FALSE), value = TRUE)
+arquivo <- if (length(arquivo) > 0) sub("^--file=", "", arquivo[1]) else
+  file.path(getwd(), "scripts", "baixar_tudo.R")
+raiz <- dirname(dirname(normalizePath(arquivo, mustWork = FALSE)))
+source(file.path(raiz, "scripts", "carregar_funcoes.R"))
 
 # 2) Interpreta os argumentos da linha de comando -----------------------------
 args <- commandArgs(trailingOnly = TRUE)
 i_camada <- which(args == "--camada")
 
 if (length(i_camada) > 0) {
+  if (length(i_camada) != 1 || i_camada == length(args)) {
+    stop("Use `--camada NOME_DA_CAMADA` exatamente uma vez.")
+  }
+  extras <- setdiff(seq_along(args), c(i_camada, i_camada + 1L))
+  if (length(extras) > 0) {
+    stop("Não misture `--camada` com temas ou outros argumentos.")
+  }
   camada <- args[i_camada + 1]
   cat("==> Baixando a camada:", camada, "\n")
   resumo <- gs_baixar_camada(camada)

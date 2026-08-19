@@ -30,6 +30,36 @@ gs_epsg <- list(
 # --- Página padrão do WFS (quantas feições buscar por requisição) ----------
 gs_tamanho_pagina <- 1000
 
+# --- Configurações HTTP ------------------------------------------------------
+# Podem ser reduzidas em testes ou aumentadas para conexões mais lentas.
+gs_http_timeout_s <- function() {
+  gs_validar_numero_escalar(
+    getOption("gs.http_timeout_s", 120), "options(gs.http_timeout_s)",
+    minimo = 0, minimo_inclusivo = FALSE
+  )
+}
+
+gs_http_tentativas <- function() {
+  as.integer(gs_validar_numero_escalar(
+    getOption("gs.http_tentativas", 3L), "options(gs.http_tentativas)",
+    minimo = 1, inteiro = TRUE
+  ))
+}
+
+# Requisições idempotentes usam retry para falhas transitórias e timeout finito.
+gs_http_get <- function(url, query = NULL, timeout_s = gs_http_timeout_s(), ...) {
+  httr::RETRY(
+    "GET", url,
+    query = query,
+    ...,
+    httr::timeout(timeout_s),
+    times = gs_http_tentativas(),
+    pause_base = 0.5,
+    pause_cap = 4,
+    quiet = TRUE
+  )
+}
+
 # --- Configurações do módulo de CEP -----------------------------------------
 # Tolerância padrão (metros) para verificar se uma coordenada confere com um CEP.
 gs_tolerancia_cep_m <- 300
@@ -99,15 +129,170 @@ gs_raiz <- function() {
   }
 }
 
-# --- Pasta de dados (criada automaticamente) --------------------------------
-gs_pasta_dados <- function() {
-  dir <- file.path(gs_raiz(), "data")
-  dir.create(dir, showWarnings = FALSE, recursive = TRUE)
+# --- Pasta de dados ----------------------------------------------------------
+# O caminho sem efeitos colaterais é usado por funções que apenas leem dados.
+gs_caminho_dados <- function() {
+  file.path(gs_raiz(), "data")
+}
+
+# Mantém o comportamento histórico para chamadas diretas e rotinas de escrita.
+gs_pasta_dados <- function(criar = TRUE) {
+  if (length(criar) != 1 || is.na(criar) || !is.logical(criar)) {
+    stop("`criar` deve ser TRUE ou FALSE.")
+  }
+  dir <- gs_caminho_dados()
+  if (criar) dir.create(dir, showWarnings = FALSE, recursive = TRUE)
   dir
 }
 
 # --- Funções auxiliares internas -------------------------------------------
+# Valida números usados nas interfaces escalares do projeto.
+gs_validar_numero_escalar <- function(x, nome, minimo = -Inf, maximo = Inf,
+                                      minimo_inclusivo = TRUE,
+                                      maximo_inclusivo = TRUE,
+                                      inteiro = FALSE) {
+  valido <- is.numeric(x) && length(x) == 1 && !is.na(x) && is.finite(x)
+  if (valido && inteiro) valido <- x == floor(x)
+  if (valido) {
+    valido <- if (minimo_inclusivo) x >= minimo else x > minimo
+  }
+  if (valido) {
+    valido <- if (maximo_inclusivo) x <= maximo else x < maximo
+  }
+  if (!valido) {
+    tipo <- if (inteiro) "um inteiro" else "um número"
+    stop("`", nome, "` deve ser ", tipo, " escalar, finito e dentro do intervalo permitido.")
+  }
+  as.numeric(x)
+}
+
+gs_validar_coordenadas <- function(coordenadas) {
+  if (!is.numeric(coordenadas) || length(coordenadas) != 2 ||
+      anyNA(coordenadas) || any(!is.finite(coordenadas))) {
+    stop("`coordenadas` deve ser um vetor numérico c(latitude, longitude), sem NA.")
+  }
+  latitude <- gs_validar_numero_escalar(coordenadas[1], "latitude",
+                                        minimo = -90, maximo = 90)
+  longitude <- gs_validar_numero_escalar(coordenadas[2], "longitude",
+                                         minimo = -180, maximo = 180)
+  c(latitude, longitude)
+}
+
+gs_slug <- function(x, padrao = "item", max_chars = 64) {
+  x <- if (length(x) == 0 || is.na(x[1])) "" else as.character(x[1])
+  x <- iconv(x, from = "", to = "ASCII//TRANSLIT", sub = "")
+  x <- tolower(x)
+  x <- gsub("[^a-z0-9]+", "_", x)
+  x <- gsub("^_+|_+$", "", x)
+  if (!nzchar(x)) x <- padrao
+  substr(x, 1, max_chars)
+}
+
+# Escreve no mesmo diretório e só substitui o destino após concluir a escrita.
+gs_gravar_atomico <- function(caminho, escrever) {
+  pasta <- dirname(caminho)
+  if (!dir.exists(pasta)) {
+    stop("Diretório de destino inexistente: ", pasta)
+  }
+  extensao <- tools::file_ext(caminho)
+  temporario <- tempfile(
+    pattern = paste0(".", basename(caminho), "-"),
+    tmpdir = pasta,
+    fileext = if (nzchar(extensao)) paste0(".", extensao) else ""
+  )
+  concluido <- FALSE
+  on.exit({
+    if (!concluido && file.exists(temporario)) unlink(temporario)
+  }, add = TRUE)
+
+  escrever(temporario)
+  if (!file.exists(temporario)) {
+    stop("A escrita temporária não produziu o arquivo esperado: ", caminho)
+  }
+  if (!file.rename(temporario, caminho)) {
+    stop("Não foi possível substituir atomicamente o arquivo: ", caminho)
+  }
+  concluido <- TRUE
+  caminho
+}
+
+gs_hash_curto <- function(x) {
+  codigos <- utf8ToInt(enc2utf8(as.character(x)[1]))
+  hash <- 0
+  for (codigo in codigos) hash <- (hash * 131 + codigo) %% 2147483647
+  sprintf("%08x", as.integer(hash))
+}
+
+# Promove um conjunto de arquivos como uma unidade e restaura os anteriores se
+# qualquer rename falhar. As origens devem estar no mesmo filesystem.
+gs_promover_conjunto_atomico <- function(origens, destinos) {
+  if (length(origens) != length(destinos) || length(origens) == 0 ||
+      any(!file.exists(origens))) {
+    stop("Conjunto de arquivos inválido para promoção atômica.")
+  }
+  dir.create(unique(dirname(destinos)), recursive = TRUE, showWarnings = FALSE)
+  backups <- paste0(
+    destinos, ".backup-", Sys.getpid(), "-", seq_along(destinos)
+  )
+  havia <- file.exists(destinos)
+  movidos <- rep(FALSE, length(destinos))
+  concluido <- FALSE
+  on.exit({
+    if (!concluido) {
+      unlink(destinos[movidos], force = TRUE)
+      for (i in which(havia)) {
+        if (file.exists(backups[i])) file.rename(backups[i], destinos[i])
+      }
+    }
+    unlink(backups[file.exists(backups)], force = TRUE)
+  }, add = TRUE)
+
+  for (i in which(havia)) {
+    if (!file.rename(destinos[i], backups[i])) {
+      stop("Não foi possível preparar a substituição de: ", destinos[i])
+    }
+  }
+  for (i in seq_along(origens)) {
+    if (!file.rename(origens[i], destinos[i])) {
+      stop("Não foi possível promover o arquivo: ", destinos[i])
+    }
+    movidos[i] <- TRUE
+  }
+  concluido <- TRUE
+  unlink(backups[file.exists(backups)], force = TRUE)
+  invisible(destinos)
+}
+
+# Leitores compartilhados validam problemas de parsing em vez de ocultá-los.
+gs_validar_csv_lido <- function(tab, arquivo) {
+  problemas <- readr::problems(tab)
+  if (nrow(problemas) > 0) {
+    stop("Arquivo CSV corrompido ou malformado: ", arquivo,
+         " (primeiro problema na linha ", problemas$row[1], ").")
+  }
+  tab
+}
+
+gs_ler_cabecalho_csv <- function(arquivo) {
+  tab <- suppressWarnings(readr::read_csv(
+    arquivo, n_max = 0, show_col_types = FALSE
+  ))
+  gs_validar_csv_lido(tab, arquivo)
+}
+
+gs_ler_csv_verificado <- function(arquivo, ...) {
+  tab <- suppressWarnings(readr::read_csv(
+    arquivo, ..., show_col_types = FALSE
+  ))
+  gs_validar_csv_lido(tab, arquivo)
+}
+
+# Remove o namespace usado pelo GeoServer nas respostas do catálogo.
+gs_nome_base <- function(camada) {
+  sub("^geoportal:", "", as.character(camada))
+}
+
 # Garante que o vetor de camadas comece com o prefixo "geoportal:".
 gs_nome_completo <- function(camada) {
-  if (!grepl("^geoportal:", camada)) paste0("geoportal:", camada) else camada
+  paste0("geoportal:", gs_nome_base(camada))
 }

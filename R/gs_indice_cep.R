@@ -8,8 +8,28 @@
 # ============================================================
 
 # --- Lista as camadas disponíveis localmente (nomes base dos CSVs) ---------
-gs_camadas_local <- function(dir = gs_pasta_dados()) {
-  gsub("\\.csv$", "", basename(list.files(dir, pattern = "\\.csv$")))
+gs_camadas_local <- function(dir = gs_caminho_dados()) {
+  sort(gsub("\\.csv$", "", basename(list.files(dir, pattern = "\\.csv$"))))
+}
+
+gs_parar_indice_ausente <- function(mensagem) {
+  erro <- simpleError(mensagem, call = NULL)
+  class(erro) <- c("gs_indice_ausente", class(erro))
+  stop(erro)
+}
+
+gs_chave_cache_indice <- function(dir, arquivos) {
+  dir <- normalizePath(dir, winslash = "/", mustWork = FALSE)
+  if (length(arquivos) == 0) return(paste0(dir, "|sem_csv"))
+  arquivos <- sort(arquivos)
+  info <- file.info(arquivos)
+  assinatura <- paste(
+    basename(arquivos),
+    format(info$size, scientific = FALSE, trim = TRUE),
+    format(as.numeric(info$mtime), digits = 17, scientific = FALSE, trim = TRUE),
+    sep = ":"
+  )
+  paste(c(dir, assinatura), collapse = "|")
 }
 
 # --- Monta o índice local CEP -> coordenadas --------------------------------
@@ -18,29 +38,46 @@ gs_camadas_local <- function(dir = gs_pasta_dados()) {
 # sessão (options); use force = TRUE para reconstruir.
 # Colunas: cep, camada, latitude, longitude, nm_equipamento,
 #          nm_bairro_equipamento, tx_endereco_equipamento.
-gs_indice_cep <- function(dir = gs_pasta_dados(), force = FALSE) {
+gs_indice_cep <- function(dir = gs_caminho_dados(), force = FALSE) {
+  if (!is.logical(force) || length(force) != 1 || is.na(force)) {
+    stop("`force` deve ser TRUE ou FALSE.")
+  }
+  arquivos <- sort(list.files(dir, pattern = "\\.csv$", full.names = TRUE))
+  chave_cache <- gs_chave_cache_indice(dir, arquivos)
   cache <- getOption("gs.indice_cep")
-  if (!force && !is.null(cache)) return(cache)
+  if (!force && is.data.frame(cache) &&
+      identical(attr(cache, "gs.chave_cache"), chave_cache)) {
+    return(cache)
+  }
 
-  arquivos <- list.files(dir, pattern = "\\.csv$", full.names = TRUE)
   if (length(arquivos) == 0) {
-    stop("Nenhum arquivo CSV em ", dir,
-         ". Baixe as camadas antes com gs_baixar_todos_equipamentos().")
+    gs_parar_indice_ausente(paste0(
+      "Nenhum arquivo CSV em ", dir,
+      ". Baixe as camadas antes com gs_baixar_todos_equipamentos()."
+    ))
   }
 
   linhas <- lapply(arquivos, function(arq) {
     camada <- gsub("\\.csv$", "", basename(arq))
-    tab <- tryCatch(readr::read_csv(arq, show_col_types = FALSE),
-                    error = function(e) NULL)
-    if (is.null(tab)) return(NULL)
-    if (!all(c("cd_cep_equipamento", "latitude", "longitude") %in% names(tab))) {
+    cabecalho <- gs_ler_cabecalho_csv(arq)
+    colunas <- c("cd_cep_equipamento", "latitude", "longitude")
+    if (!all(colunas %in% names(cabecalho))) {
       return(NULL)  # camadas sem ponto/CEP (ex.: polígonos) são ignoradas
     }
+    tab <- gs_ler_csv_verificado(
+      arq,
+      col_types = readr::cols(
+        cd_cep_equipamento = readr::col_character(),
+        latitude = readr::col_double(),
+        longitude = readr::col_double(),
+        .default = readr::col_guess()
+      )
+    )
     out <- data.frame(
       camada    = camada,
       cep       = as.character(tab$cd_cep_equipamento),
-      latitude  = as.numeric(tab$latitude),
-      longitude = as.numeric(tab$longitude),
+      latitude  = suppressWarnings(as.numeric(tab$latitude)),
+      longitude = suppressWarnings(as.numeric(tab$longitude)),
       stringsAsFactors = FALSE
     )
     for (col in c("nm_equipamento", "nm_bairro_equipamento", "tx_endereco_equipamento")) {
@@ -51,12 +88,23 @@ gs_indice_cep <- function(dir = gs_pasta_dados(), force = FALSE) {
 
   idx <- do.call(rbind, Filter(Negate(is.null), linhas))
   if (is.null(idx) || nrow(idx) == 0) {
-    stop("Nenhum registro com CEP e coordenadas encontrado nos CSVs de ", dir, ".")
+    gs_parar_indice_ausente(paste0(
+      "Nenhum registro com CEP e coordenadas encontrado nos CSVs de ", dir, "."
+    ))
   }
 
   idx$cep <- gsub("\\D", "", idx$cep)
   idx <- idx[!is.na(idx$cep) & nchar(idx$cep) == 8 &
-             !is.na(idx$latitude) & !is.na(idx$longitude), , drop = FALSE]
+              !is.na(idx$latitude) & is.finite(idx$latitude) &
+              idx$latitude >= -90 & idx$latitude <= 90 &
+              !is.na(idx$longitude) & is.finite(idx$longitude) &
+              idx$longitude >= -180 & idx$longitude <= 180, , drop = FALSE]
+  if (nrow(idx) == 0) {
+    gs_parar_indice_ausente(paste0(
+      "Nenhum registro com CEP e coordenadas válidos encontrado nos CSVs de ",
+      dir, "."
+    ))
+  }
   idx$latitude  <- as.numeric(idx$latitude)
   idx$longitude <- as.numeric(idx$longitude)
   rownames(idx) <- NULL
@@ -83,12 +131,14 @@ gs_indice_cep <- function(dir = gs_pasta_dados(), force = FALSE) {
   idx <- idx[order(idx$cep), , drop = FALSE]
   rownames(idx) <- NULL
 
+  attr(idx, "gs.chave_cache") <- chave_cache
   options(gs.indice_cep = idx)
   idx
 }
 
 # --- Coordenada "representante" de cada CEP (mediana das ocorrências) -------
-gs_cep_referencia <- function(indice = gs_indice_cep()) {
+gs_cep_referencia <- function(indice = NULL, dir = gs_caminho_dados()) {
+  if (is.null(indice)) indice <- gs_indice_cep(dir = dir)
   if (is.null(indice) || nrow(indice) == 0) return(data.frame())
   stats::aggregate(
     cbind(latitude, longitude) ~ cep,

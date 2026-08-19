@@ -9,36 +9,48 @@
 # --- Consulta o GetCapabilities e monta o catálogo -------------------------
 # O resultado é um data.frame com: camada (nome técnico), titulo, resumo e crs.
 gs_camadas_disponiveis <- function(force = FALSE) {
-  cache <- file.path(tempdir(), "gs_cap_wfs.xml")
+  if (!is.logical(force) || length(force) != 1 || is.na(force)) {
+    stop("`force` deve ser TRUE ou FALSE.")
+  }
+  cache <- getOption("gs.cache_capabilities",
+                     file.path(tempdir(), "gs_cap_wfs.xml"))
 
-  if (!force && file.exists(cache) &&
-      difftime(Sys.time(), file.info(cache)$mtime, units = "hours") < 1) {
+  idade_h <- if (file.exists(cache)) {
+    as.numeric(difftime(Sys.time(), file.info(cache)$mtime, units = "hours"))
+  } else {
+    Inf
+  }
+  if (!force && is.finite(idade_h) && idade_h < 1) {
     txt <- readLines(cache, warn = FALSE, encoding = "UTF-8")
   } else {
-    resp <- httr::GET(gs_urls$wfs, query = list(
+    resp <- gs_http_get(gs_urls$wfs, query = list(
       service = "WFS", version = "2.0.0", request = "GetCapabilities"
     ))
     httr::stop_for_status(resp)
     txt <- httr::content(resp, as = "text", encoding = "UTF-8")
-    writeLines(txt, cache)
+    gs_gravar_atomico(cache, function(temporario) {
+      writeLines(txt, temporario, useBytes = TRUE)
+    })
   }
 
   xml <- xml2::read_xml(paste(txt, collapse = "\n"))
-  ns  <- xml2::xml_ns(xml)
-  fts <- xml2::xml_find_all(xml, ".//wfs:FeatureType", ns)
+  fts <- xml2::xml_find_all(xml, ".//*[local-name()='FeatureType']")
 
-  extrair <- function(p) {
-    x <- xml2::xml_find_first(fts, p, ns)
-    xml2::xml_text(x)
+  extrair <- function(nome) {
+    x <- xml2::xml_find_first(
+      fts, paste0("./*[local-name()='", nome, "']")
+    )
+    xml2::xml_text(x, trim = TRUE)
   }
 
-  data.frame(
-    camada = extrair("./wfs:Name"),
-    titulo = extrair("./wfs:Title"),
-    resumo = extrair("./wfs:Abstract"),
-    crs    = extrair("./wfs:DefaultCRS"),
+  catalogo <- data.frame(
+    camada = gs_nome_base(extrair("Name")),
+    titulo = extrair("Title"),
+    resumo = extrair("Abstract"),
+    crs    = extrair("DefaultCRS"),
     stringsAsFactors = FALSE
   )
+  catalogo[!is.na(catalogo$camada) & nzchar(catalogo$camada), , drop = FALSE]
 }
 
 # --- Filtra apenas as camadas de equipamentos públicos ----------------------
@@ -46,7 +58,7 @@ gs_camadas_disponiveis <- function(force = FALSE) {
 # hospitais, bibliotecas, centros esportivos, feiras livres etc.).
 gs_camadas_equipamentos <- function(force = FALSE) {
   catalogo <- gs_camadas_disponiveis(force = force)
-  catalogo[grepl("equipamento_", catalogo$camada, ignore.case = TRUE), , drop = FALSE]
+  catalogo[grepl("^equipamento_", catalogo$camada, ignore.case = TRUE), , drop = FALSE]
 }
 
 # --- Busca camadas por palavra-chave no título ou nome ----------------------
@@ -61,27 +73,32 @@ gs_buscar_camadas <- function(termo, force = FALSE) {
 # --- Devolve o "cardápio" amigável de equipamentos --------------------------
 gs_catalogo_equipamentos <- function(force = FALSE) {
   eq <- gs_camadas_equipamentos(force = force)
-  eq$tema <- gsub("^equipamento_([a-z_]+?)(_.*)?$", "\\1", eq$camada)
+  eq$tema <- gs_tema_camada(eq$camada)
   eq[order(eq$tema, eq$titulo), c("camada", "tema", "titulo", "resumo")]
 }
 
 # --- Tema de uma camada local (mesma regra do catálogo) ---------------------
 # "equipamento_saude_ubs_posto_centro" -> "saude"
 gs_tema_camada <- function(camada) {
-  gsub("^equipamento_([a-z_]+?)(_.*)?$", "\\1", camada)
+  base <- tolower(gs_nome_base(camada))
+  equipamento <- !is.na(base) & grepl("^equipamento_[^_]+", base)
+  tema <- base
+  tema[equipamento] <- sub(
+    "^equipamento_([^_]+)(?:_.*)?$", "\\1", base[equipamento], perl = TRUE
+  )
+  tema
 }
 
 # --- Lista os serviços disponíveis LOCALMENTE, agrupados por tema -----------
 # Mostra exatamente o que usar no argumento `camadas` de gs_servicos_proximos().
 # Só lista camadas de ponto (com latitude/longitude nos CSVs de data/).
 # `termo` filtra por tema ou nome (ex.: gs_listar_servicos("saude")).
-gs_listar_servicos <- function(termo = NULL, dir = gs_pasta_dados()) {
+gs_listar_servicos <- function(termo = NULL, dir = gs_caminho_dados()) {
   camadas <- gs_camadas_local(dir)
   tem <- vapply(camadas, function(cam) {
     arq <- file.path(dir, paste0(cam, ".csv"))
-    tab <- tryCatch(readr::read_csv(arq, n_max = 0, show_col_types = FALSE),
-                    error = function(e) NULL)
-    !is.null(tab) && all(c("latitude", "longitude") %in% names(tab))
+    tab <- gs_ler_cabecalho_csv(arq)
+    all(c("latitude", "longitude") %in% names(tab))
   }, logical(1))
   camadas <- sort(camadas[tem])
   if (length(camadas) == 0) {

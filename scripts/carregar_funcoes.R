@@ -16,23 +16,33 @@
 # ============================================================
 
 # 1) Acha a raiz do projeto -------------------------------------------
+caminho_script <- function() {
+  arquivo <- tryCatch(sys.frame(1)$ofile, error = function(e) NULL)
+  if (!is.null(arquivo) && nzchar(arquivo)) return(arquivo)
+  arg <- grep("^--file=", commandArgs(trailingOnly = FALSE), value = TRUE)
+  if (length(arg) > 0) sub("^--file=", "", arg[1]) else NULL
+}
+
 achar_raiz <- function() {
-  dir <- getwd()
-  repeat {
-    if (dir.exists(file.path(dir, "R")) && dir.exists(file.path(dir, "scripts"))) {
-      return(dir)
+  script <- caminho_script()
+  inicios <- c(if (!is.null(script)) dirname(normalizePath(script, mustWork = FALSE)),
+               getwd())
+  for (inicio in unique(inicios)) {
+    dir <- inicio
+    repeat {
+      if (dir.exists(file.path(dir, "R")) && dir.exists(file.path(dir, "scripts"))) {
+        return(normalizePath(dir, winslash = "/"))
+      }
+      pai <- dirname(dir)
+      if (identical(pai, dir)) break
+      dir <- pai
     }
-    pai <- dirname(dir)
-    if (identical(pai, dir)) {
-      stop("Não achei a raiz do projeto (procuro uma pasta com R/ e scripts/). ",
-           "Rode a partir da pasta do projeto ou use setwd().")
-    }
-    dir <- pai
   }
+  stop("Não achei a raiz do projeto (procuro uma pasta com R/ e scripts/).")
 }
 
 raiz <- achar_raiz()
-setwd(raiz)
+options(gs.raiz = raiz)
 
 # 2) Confere os pacotes ------------------------------------------------
 pkg <- c("httr", "jsonlite", "sf", "readr", "xml2")
@@ -42,7 +52,9 @@ if (length(faltando) > 0) {
        ". Instale com install.packages(c('", paste(faltando, collapse = "','"), "'))")
 }
 
-# 3) Carrega as funções (em silêncio) -----------------------------------
-invisible(lapply(list.files("R", full.names = TRUE, pattern = "\\.R$"), source))
+# 3) Carrega as funções (em silêncio), sem alterar o working directory --
+arquivos_r <- sort(list.files(file.path(raiz, "R"), full.names = TRUE,
+                              pattern = "\\.R$"))
+invisible(lapply(arquivos_r, source))
 
 cat("✅ Funções do GeoSampa carregadas! Boa garimpagem! 🗺️✨\n")

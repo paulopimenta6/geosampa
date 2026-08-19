@@ -10,15 +10,21 @@
 
 # --- Normaliza um CEP para 8 dígitos ---------------------------------------
 gs_normalizar_cep <- function(cep) {
-  cep <- gsub("[^0-9]", "", as.character(cep))
-  if (nchar(cep) != 8) {
-    stop("CEP inválido: '", cep, "'. Informe 8 dígitos (ex.: 03175001 ou 03175-001).")
+  if (length(cep) != 1 || is.na(cep) || !is.atomic(cep)) {
+    stop("`cep` deve ser um valor escalar não ausente.")
+  }
+  cep_original <- as.character(cep)
+  cep <- gsub("[^0-9]", "", cep_original)
+  if (!nzchar(cep) || nchar(cep) != 8) {
+    stop("CEP inválido: '", cep_original,
+         "'. Informe 8 dígitos (ex.: 03175001 ou 03175-001).")
   }
   cep
 }
 
 # --- Máscara 00000-000 -------------------------------------------------------
 gs_cep_mascarado <- function(cep) {
+  cep <- gs_normalizar_cep(cep)
   paste0(substr(cep, 1, 5), "-", substr(cep, 6, 8))
 }
 
@@ -27,7 +33,7 @@ gs_cep_mascarado <- function(cep) {
 gs_ler_cep <- function(cep) {
   cep <- gs_normalizar_cep(cep)
   url <- sub("{cep}", cep, gs_urls$viacep, fixed = TRUE)
-  resp <- httr::GET(url, httr::timeout(30))
+  resp <- gs_http_get(url, timeout_s = 30)
   httr::stop_for_status(resp)
   dados <- jsonlite::fromJSON(
     httr::content(resp, as = "text", encoding = "UTF-8"),
@@ -55,12 +61,16 @@ gs_ler_cep <- function(cep) {
 # Respeita a política de uso (~1 requisição por segundo): espera antes de cada
 # chamada e identifica o usuário. Devolve lista com lat/lon ou NULL se vazio.
 gs_consultar_nominatim <- function(query) {
+  if (!is.list(query)) stop("A consulta ao Nominatim deve ser uma lista nomeada.")
+  query$format <- "json"
+  query$limit <- "1"
+  query$countrycodes <- "br"
   Sys.sleep(gs_pausa_nominatim_s)
-  resp <- httr::GET(
+  resp <- gs_http_get(
     gs_urls$nominatim,
-    query = c(query, list(format = "json", limit = "1")),
-    httr::user_agent("geosampaR/1.0 (contato: paulopimenta6@gmail.com)"),
-    httr::timeout(30)
+    query = query,
+    timeout_s = 30,
+    httr::user_agent("geosampaR/1.0 (contato: paulopimenta6@gmail.com)")
   )
   httr::stop_for_status(resp)
   dados <- jsonlite::fromJSON(
@@ -83,13 +93,17 @@ gs_consultar_nominatim <- function(query) {
 #      na base do OSM (comum no Brasil), usa o endereço do viaCEP para achar
 #      a rua; em último caso, o centróide da cidade.
 # Retorna data.frame com cep, latitude, longitude, fonte e precisão.
-gs_cep_para_coordenadas <- function(cep, fonte = c("local", "nominatim")) {
+gs_cep_para_coordenadas <- function(cep, fonte = c("local", "nominatim"),
+                                    dir = gs_caminho_dados()) {
   fonte <- match.arg(fonte)
   cep <- gs_normalizar_cep(cep)
   cep_masc <- gs_cep_mascarado(cep)
 
   if (fonte == "local") {
-    ref <- gs_cep_referencia()
+    ref <- tryCatch(
+      gs_cep_referencia(dir = dir),
+      gs_indice_ausente = function(e) data.frame()
+    )
     achou <- ref[ref$cep == cep, , drop = FALSE]
     if (nrow(achou) > 0) {
       return(data.frame(
@@ -108,6 +122,7 @@ gs_cep_para_coordenadas <- function(cep, fonte = c("local", "nominatim")) {
   #   1) código postal;  2) rua via viaCEP;  3) cidade via viaCEP.
   r <- gs_consultar_nominatim(list(postalcode = cep_masc, country = "Brazil"))
   precisao <- "coordenada aproximada do código postal (OpenStreetMap)"
+  endereco <- NULL
   if (is.null(r)) {
     endereco <- tryCatch(gs_ler_cep(cep), error = function(e) NULL)
     if (!is.null(endereco) && !is.na(endereco$logradouro) &&
@@ -119,8 +134,7 @@ gs_cep_para_coordenadas <- function(cep, fonte = c("local", "nominatim")) {
     }
   }
   if (is.null(r)) {
-    endereco <- tryCatch(gs_ler_cep(cep), error = function(e) NULL)
-    if (!is.null(endereco)) {
+    if (!is.null(endereco) && !is.na(endereco$cidade) && nzchar(endereco$cidade)) {
       r <- gs_consultar_nominatim(list(
         city = endereco$cidade, state = endereco$uf, country = "Brazil"))
       precisao <- "coordenada aproximada da cidade (OpenStreetMap via viaCEP)"
@@ -132,10 +146,11 @@ gs_cep_para_coordenadas <- function(cep, fonte = c("local", "nominatim")) {
          "públicos) e o Nominatim não achou o código postal nem o endereço ",
          "no OpenStreetMap. Confira o CEP ou tente outro.")
   }
+  coordenadas <- gs_validar_coordenadas(c(r$latitude, r$longitude))
   data.frame(
     cep       = cep_masc,
-    latitude  = r$latitude,
-    longitude = r$longitude,
+    latitude  = coordenadas[1],
+    longitude = coordenadas[2],
     fonte     = "nominatim",
     precisao  = precisao,
     stringsAsFactors = FALSE
@@ -145,21 +160,25 @@ gs_cep_para_coordenadas <- function(cep, fonte = c("local", "nominatim")) {
 # --- Resolve um ponto de interesse a partir de CEP ou coordenadas -----------
 # Uso interno do módulo: devolve lista com latitude, longitude, origem (rótulo)
 # e o ponto como objeto sf (EPSG:4326).
-gs_resolver_ponto <- function(cep = NULL, coordenadas = NULL) {
-  if (!is.null(cep)) {
-    coord <- gs_cep_para_coordenadas(cep)
-    lat <- coord$latitude
-    lon <- coord$longitude
+gs_resolver_ponto <- function(cep = NULL, coordenadas = NULL,
+                              dir = gs_caminho_dados()) {
+  tem_cep <- !is.null(cep)
+  tem_coordenadas <- !is.null(coordenadas)
+  if (identical(tem_cep, tem_coordenadas)) {
+    stop("Informe exatamente um entre `cep` e `coordenadas`.")
+  }
+
+  if (tem_cep) {
+    coord <- gs_cep_para_coordenadas(cep, dir = dir)
+    ponto <- gs_validar_coordenadas(c(coord$latitude, coord$longitude))
+    lat <- ponto[1]
+    lon <- ponto[2]
     origem <- paste0("CEP ", coord$cep, " (fonte: ", coord$fonte, ")")
-  } else if (!is.null(coordenadas)) {
-    if (length(coordenadas) != 2 || any(is.na(coordenadas))) {
-      stop("`coordenadas` deve ser um vetor c(latitude, longitude).")
-    }
-    lat <- as.numeric(coordenadas[1])
-    lon <- as.numeric(coordenadas[2])
-    origem <- "coordenadas informadas"
   } else {
-    stop("Informe `cep` ou `coordenadas = c(latitude, longitude)`.")
+    ponto <- gs_validar_coordenadas(coordenadas)
+    lat <- ponto[1]
+    lon <- ponto[2]
+    origem <- "coordenadas informadas"
   }
   list(
     latitude  = lat,
@@ -174,15 +193,27 @@ gs_resolver_ponto <- function(cep = NULL, coordenadas = NULL) {
 # (índice local; se ausente, usa o Nominatim). Devolve uma lista com a
 # distância mínima e o veredito dentro da tolerância.
 gs_verificar_cep <- function(cep, latitude, longitude,
-                             tolerancia_m = gs_tolerancia_cep_m) {
+                              tolerancia_m = gs_tolerancia_cep_m,
+                              dir = gs_caminho_dados()) {
   cep <- gs_normalizar_cep(cep)
-  if (is.na(latitude) || is.na(longitude)) {
-    stop("Informe latitude e longitude válidas.")
-  }
+  latitude <- gs_validar_numero_escalar(latitude, "latitude",
+                                        minimo = -90, maximo = 90)
+  longitude <- gs_validar_numero_escalar(longitude, "longitude",
+                                         minimo = -180, maximo = 180)
+  tolerancia_m <- gs_validar_numero_escalar(
+    tolerancia_m, "tolerancia_m", minimo = 0
+  )
   ponto <- sf::st_sfc(sf::st_point(c(longitude, latitude)), crs = gs_epsg$wgs84)
 
-  indice <- gs_indice_cep()
-  ocorrencias <- indice[indice$cep == cep, , drop = FALSE]
+  indice <- tryCatch(
+    gs_indice_cep(dir = dir),
+    gs_indice_ausente = function(e) NULL
+  )
+  ocorrencias <- if (is.null(indice)) {
+    data.frame()
+  } else {
+    indice[indice$cep == cep, , drop = FALSE]
+  }
 
   if (nrow(ocorrencias) > 0) {
     pts <- sf::st_as_sf(ocorrencias, coords = c("longitude", "latitude"),
@@ -199,13 +230,23 @@ gs_verificar_cep <- function(cep, latitude, longitude,
       veredito               = if (dmin <= tolerancia_m) "CONFERE" else "NAO CONFERE",
       tolerancia_m           = tolerancia_m,
       n_ocorrencias          = nrow(ocorrencias),
-      equipamento_referencia = ocorrencias$nm_equipamento[i],
-      camada_referencia      = ocorrencias$camada[i]
+      equipamento_referencia = if ("nm_equipamento" %in% names(ocorrencias)) {
+        ocorrencias$nm_equipamento[i]
+      } else {
+        NA_character_
+      },
+      camada_referencia      = if ("camada" %in% names(ocorrencias)) {
+        ocorrencias$camada[i]
+      } else {
+        NA_character_
+      }
     ))
   }
 
-  ref <- tryCatch(gs_cep_para_coordenadas(cep, fonte = "nominatim"),
-                  error = function(e) NULL)
+  ref <- tryCatch(gs_cep_para_coordenadas(
+    cep, fonte = "nominatim", dir = dir
+  ),
+  error = function(e) NULL)
   if (is.null(ref)) {
     return(list(
       cep                    = gs_cep_mascarado(cep),
@@ -218,23 +259,41 @@ gs_verificar_cep <- function(cep, latitude, longitude,
       n_ocorrencias          = 0L,
       equipamento_referencia = NA_character_,
       camada_referencia      = NA_character_,
-      motivo                 = "CEP fora do índice local e sem coordenada ",
-        "obtida no Nominatim/OSM (nem viaCEP). Não foi possível verificar."
+      motivo                 = paste0(
+        "CEP fora do índice local e sem coordenada obtida no Nominatim/OSM ",
+        "(nem viaCEP). Não foi possível verificar."
+      )
     ))
   }
   ref_pt <- sf::st_sfc(sf::st_point(c(ref$longitude, ref$latitude)),
                        crs = gs_epsg$wgs84)
   d <- as.numeric(sf::st_distance(ponto, ref_pt))
-  list(
+  precisao_baixa <- length(ref$precisao) == 1 && !is.na(ref$precisao) &&
+    grepl("rua|cidade", ref$precisao, ignore.case = TRUE)
+  confere <- if (precisao_baixa) NA else d <= tolerancia_m
+  resultado <- list(
     cep                    = gs_cep_mascarado(cep),
     latitude_cep           = ref$latitude,
     longitude_cep          = ref$longitude,
     distancia_m            = round(d, 1),
-    confere                = d <= tolerancia_m,
-    veredito               = if (d <= tolerancia_m) "CONFERE" else "NAO CONFERE",
+    confere                = confere,
+    veredito               = if (precisao_baixa) {
+      "SEM DADO SUFICIENTE"
+    } else if (confere) {
+      "CONFERE"
+    } else {
+      "NAO CONFERE"
+    },
     tolerancia_m           = tolerancia_m,
     n_ocorrencias          = 0L,
     equipamento_referencia = NA_character_,
     camada_referencia      = NA_character_
   )
+  if (precisao_baixa) {
+    resultado$motivo <- paste0(
+      "A referência disponível tem precisão de ", ref$precisao,
+      "; a distância é apenas informativa."
+    )
+  }
+  resultado
 }

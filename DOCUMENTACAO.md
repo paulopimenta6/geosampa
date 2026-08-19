@@ -137,12 +137,19 @@ geosampa/
 
 ### Antes de começar
 
-Rode o R a partir da pasta do projeto e carregue as funções:
+Restaure o ambiente reproduzível na primeira execução:
+
+```bash
+Rscript scripts/configurar_ambiente.R
+```
+
+Depois reinicie a sessão R e carregue as funções:
 
 ```r
-# Carrega todas as funções do projeto
-lapply(list.files("R", full.names = TRUE, pattern = "\\.R$"), source)
+source("scripts/carregar_funcoes.R")
 ```
+
+O carregador encontra a raiz do projeto sem alterar o diretório de trabalho.
 
 ### Exemplo 1: ver o que existe
 
@@ -258,8 +265,9 @@ registros existem — é assim que o robô sabe quando parar de buscar.
   mas é sempre bom citar a fonte: **Prefeitura de São Paulo / Geoinfo (SMUL)**.
 - Consulte o **metadado** da camada antes de usá-la em análises sérias — ele
   informa escala, atualização e órgão responsável.
-- Não faça download em rajada: nosso sistema já pausa entre páginas. Se for
-  baixar muitas camadas de uma vez, dê um tempo entre execuções.
+- Não faça downloads repetidos sem necessidade. O sistema usa páginas
+  ordenadas, tentativas com espera progressiva e validação de integridade, mas
+  o WFS continua sendo um serviço público compartilhado.
 
 ---
 
@@ -359,7 +367,7 @@ install.packages(c("ggplot2", "leaflet", "htmlwidgets"))  # mapas
 install.packages(c("spdep"))                              # Moran's I, LISA, Getis-Ord
 install.packages(c("osrm"))                               # rede viária
 install.packages(c("spatstat"))                           # função K de Ripley
-install.packages(c("htmltools", "base64enc"))             # relatório HTML
+install.packages(c("htmltools"))                          # relatório HTML
 install.packages(c("testthat"))                           # testes automatizados
 ```
 
@@ -578,7 +586,7 @@ analises <- gs_analise_servicos(
 | `kde_banda` | KDE com largura de banda estimada (Silverman) | nenhuma |
 | `raios_progressivos` | Oportunidades acumuladas por raio (tabela + curva) | nenhuma |
 | `getis_ord` | Getis-Ord G* local em grade hexagonal (pontos quentes/frios) | `spdep` (opcional) |
-| `lisa` | Moran local (LISA) em grade hexagonal (alto-alto/baixo-baixo) | `spdep` (opcional) |
+| `lisa` | Moran local em quatro quadrantes, com ajuste BH | `spdep` (opcional) |
 | `ripley_k` | Função K de Ripley (agregação em múltiplas escalas) | `spatstat` (opcional) |
 | `moran` | Moran's I sobre contagens em grade hexagonal (padrão) | `spdep` (opcional) |
 | `moran_distrital` | Moran's I e LISA agregados por distrito | `spdep` (opcional) |
@@ -628,11 +636,13 @@ Se um pacote opcional (`spdep` ou `osrm`) não estiver instalado, a análise
 - `kde` / `kde_banda`: fazem um "mapa de calor" — onde os serviços se amontoam.
 - `raios_progressivos`: mostra quantos serviços você encontra conforme caminha
   500 m, 1 km, 2 km... — agora também com a curva de oportunidades acumuladas.
-- `getis_ord`: aponta **onde** estão os aglomerados (pontos quentes/frios) em
-  células hexagonais (aviso: p-valores locais sem correção para múltiplos
-  testes — trate como exploratório).
-- `lisa`: identifica células alto-alto (muitos serviços vizinhos com muitos
-  serviços) e baixo-baixo (o oposto); mesmo aviso de múltiplos testes.
+- `getis_ord`: calcula Getis-Ord G* incluindo a própria célula, mantém células
+  com contagem zero e aponta pontos quentes/frios. Os p-valores bilaterais são
+  ajustados por Benjamini-Hochberg; ainda assim, trate a análise como
+  exploratória.
+- `lisa`: classifica os quatro quadrantes alto-alto, baixo-baixo, alto-baixo e
+  baixo-alto usando o valor centrado e seu lag espacial. Os p-valores também
+  recebem ajuste Benjamini-Hochberg.
 - `ripley_k`: pergunta, em várias escalas, *"os serviços se agrupam mais do que
   o acaso?"* — útil para escolher o raio de análise.
 - `moran`: pergunta *"os serviços estão mais agrupados do que o acaso?"*. A
@@ -660,14 +670,17 @@ Se um pacote opcional (`spdep` ou `osrm`) não estiver instalado, a análise
 | `gs_mapa_servicos(...)` | Mapa estático (PNG/PDF) ou interativo (HTML) | plot/HTML |
 | `gs_analise_servicos(...)` | Análises estatísticas/espaciais | lista |
 | `gs_relatorio_analises(...)` | Relatório consolidado (HTML/MD) com as análises | arquivo |
-| `gs_exportar_resultado(...)` | Exporta tabelas e polígonos em CSV/GeoJSON | caminhos |
+| `gs_relatorio_numerico(...)` | Salva todas as métricas escalares e interpretações | arquivos |
+| `gs_salvar_analises(...)` | Salva tabelas, GeoJSON, todos os plots e relatórios | manifesto |
+| `gs_analisar_locais(...)` | Executa o fluxo para vários CEPs/coordenadas | objeto `gs_lote` |
+| `gs_exportar_resultado(...)` | Exporta tabelas, métricas, plots e geometrias | manifesto |
 
 ### 10.12 Relatório e exportação 📦
 
 Um comando gera um **relatório consolidado** com as análises escolhidas:
-tabelas, gráficos e mapas num único arquivo HTML auto-contido (as figuras são
-embutidas em base64 — não depende de pandoc/rmarkdown) ou em Markdown. Cada
-seção traz **tabela + gráfico + um parágrafo de interpretação automática**
+tabelas, gráficos e mapas em HTML ou Markdown. Os PNGs permanecem salvos ao
+lado do relatório, sem depender de pandoc/rmarkdown. Cada seção traz
+**métricas + links para artefatos + um parágrafo de interpretação automática**
 (`gs_interpretar_analise()`) com a leitura dos principais resultados
 (mediana, percentis, R do NNI, Moran, cobertura etc.) — para as análises
 saírem explicadas, não só calculadas.
@@ -686,6 +699,17 @@ E para compartilhar os dados (não só as figuras):
 ```r
 analises <- gs_analise_servicos(cep = "03175-001", tipo = "descritivas")
 gs_exportar_resultado(proximos, analises, dir = "saidas")
+```
+
+Para persistir a execução completa, inclusive mapa estático, relatório
+numérico, CSV de métricas e todos os plots:
+
+```r
+gs_salvar_analises(
+  proximos, analises,
+  dir = "saidas/cep_03175001",
+  formato_relatorio = "ambos"
+)
 ```
 
 ### 10.13 Limitações conhecidas ⚠️
@@ -711,12 +735,40 @@ gs_exportar_resultado(proximos, analises, dir = "saidas")
 
 ---
 
-## 11. Ideias de próximos passos 🌟
+## 11. Execução para vários locais
 
-- 🧭 Cruzar os equipamentos com camadas de distritos/subprefeituras para saber
-  **quais regiões têm e quais não têm** determinado serviço.
-- 🗺️ Gerar mapas temáticos com `ggplot2` ou `tmap` a partir dos GeoJSON.
-- 🧮 Calcular distâncias de cada casa ao serviço mais próximo.
-- 🔁 Automatizar o download com agendamento (ex.: `cron`) para manter a base atualizada.
+CEPs e coordenadas podem ser combinados na mesma chamada:
+
+```r
+lote <- gs_analisar_locais(
+  cep = c(casa = "05508-090", trabalho = "03175-001"),
+  coordenadas = data.frame(
+    id = "manual",
+    latitude = -23.55,
+    longitude = -46.63
+  ),
+  camadas = "saude",
+  raio_m = 3000,
+  nome_execucao = "comparacao_saude",
+  formato_relatorio = "ambos"
+)
+```
+
+Cada origem recebe sua própria pasta de tabelas, geometrias, figuras e
+relatórios. Na raiz da execução são gravados `origens.csv`, `servicos.csv`,
+`metricas.csv`, `comparacao_origens.csv`, plots comparativos e
+`relatorio_lote.md`.
+
+Também há uma interface de terminal:
+
+```bash
+Rscript scripts/analisar_lote.R \
+  --ceps 05508090,05586001,05596090 \
+  --camadas saude --raio 3000 --nome comparacao_ceps
+```
+
+As comparações entre locais são descritivas. Os equipamentos representam o
+cadastro observado dentro do raio, não uma amostra aleatória; portanto,
+diferenças entre CEPs não devem ser interpretadas como efeito causal.
 
 **Boa garimpagem!** 🗺️✨
