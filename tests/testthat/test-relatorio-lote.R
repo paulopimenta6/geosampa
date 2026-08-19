@@ -29,6 +29,8 @@ test_that("coletor salva plots, tabelas, metricas e sf como GeoJSON", {
   manifesto <- gs_exportar_resultado(resultado, analises, saida, id_origem = "A")
 
   expect_true(file.exists(file.path(saida, "metricas.csv")))
+  expect_true(file.exists(file.path(saida, "metadados_consulta.csv")))
+  expect_true(file.exists(file.path(saida, "amostragem_por_camada.csv")))
   expect_true(any(manifesto$categoria == "figura" & manifesto$status == "ok"))
   expect_true(any(manifesto$categoria == "geometria" &
                     manifesto$formato == "geojson" & manifesto$status == "ok"))
@@ -40,6 +42,10 @@ test_that("coletor salva plots, tabelas, metricas e sf como GeoJSON", {
                               show_col_types = FALSE)
   expect_true(any(metricas$metrica == "estatisticas_distancia.mediana"))
   expect_true(any(metricas$metrica == "estatisticas_distancia.mad"))
+  metadados <- readr::read_csv(file.path(saida, "metadados_consulta.csv"),
+                               show_col_types = FALSE)
+  expect_identical(metadados$tipo_distancia, "geodesica")
+  expect_false(metadados$amostra_truncada)
 })
 
 test_that("salvamento consolidado mantém PNG e gera relatórios numéricos", {

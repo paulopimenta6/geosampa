@@ -516,15 +516,16 @@ gs_tipos_distancia()
 
 | Tipo | O que mede | Quando usar |
 |------|-----------|-------------|
-| `geodesica` (padrão) | Elipsoidal via `sf::st_distance` em CRS geográfico | Referência, mais precisa |
+| `geodesica` (padrão) | Grande círculo esférico via `s2`, sem depender da configuração global do `sf` | Referência reproduzível |
 | `euclidiana` | Metros na projeção UTM/SIRGAS2000 (EPSG:31983) | Rápida, boa até ~20 km |
 | `haversine` | Aproximação esférica sobre WGS84 | Leve, sem transformar CRS |
 | `manhattan` | \|Δx\| + \|Δy\| em metros projetados | "Caminhabilidade" em quadrículas |
 | `rede_viaria` | Rota real de carro via OSRM | Requer `osrm` (opcional) |
 
 **Na prática:** as três primeiras são variações de "linha reta" — a
-**geodésica** é a mais fiel à curvatura da Terra; a **euclidiana** é a mais
-rápida em metros; a **haversine** é uma aproximação esférica leve. A
+**geodésica** usa a implementação esférica do `s2`; a **euclidiana** usa a
+projeção oficial em metros; a **haversine** aplica diretamente a fórmula
+esférica com raio terrestre de 6.371.000 m. A
 **manhattan** soma os deslocamentos leste-oeste e norte-sul (imagine andar
 por quarteirões retos, como numa grade). A **rede viária** usa o grafo real
 de ruas: é a mais próxima do tempo real de caminhada/viagem, mas depende do
@@ -585,12 +586,12 @@ analises <- gs_analise_servicos(
 | `kde` | Mapa de densidade de kernel (concentração) | nenhuma |
 | `kde_banda` | KDE com largura de banda estimada (Silverman) | nenhuma |
 | `raios_progressivos` | Oportunidades acumuladas por raio (tabela + curva) | nenhuma |
-| `getis_ord` | Getis-Ord G* local em grade hexagonal (pontos quentes/frios) | `spdep` (opcional) |
-| `lisa` | Moran local em quatro quadrantes, com ajuste BH | `spdep` (opcional) |
-| `ripley_k` | Função K de Ripley (agregação em múltiplas escalas) | `spatstat` (opcional) |
-| `moran` | Moran's I sobre contagens em grade hexagonal (padrão) | `spdep` (opcional) |
-| `moran_distrital` | Moran's I e LISA agregados por distrito | `spdep` (opcional) |
-| `por_distrito` | Contagem e densidade de serviços por distrito (mapa) | internet (1ª vez) |
+| `getis_ord` | Getis-Ord G* local sobre densidades, com Monte Carlo condicional à área e ajuste BH | `spdep` (opcional) |
+| `lisa` | Moran local da densidade em quatro quadrantes, com Monte Carlo por área e ajuste BH | `spdep` (opcional) |
+| `ripley_k` | Função K de Ripley na janela da métrica, como diagnóstico sem envelope | `spatstat` (opcional) |
+| `moran` | Moran's I sobre densidades em grade hexagonal, incluindo zeros | `spdep` (opcional) |
+| `moran_distrital` | Moran's I e LISA da densidade nas partes distritais observadas | `spdep` (opcional) |
+| `por_distrito` | Contagem e densidade nas partes distritais dentro da janela (mapa) | internet (1ª vez) |
 | `cobertura_populacional` | População atendida no raio (via camada de população ou densidade) | opcional |
 | `rede_viaria` | Distância de percurso (OSRM) comparada à linha reta | `osrm` (opcional) |
 
@@ -637,24 +638,33 @@ Se um pacote opcional (`spdep` ou `osrm`) não estiver instalado, a análise
 - `raios_progressivos`: mostra quantos serviços você encontra conforme caminha
   500 m, 1 km, 2 km... — agora também com a curva de oportunidades acumuladas.
 - `getis_ord`: calcula Getis-Ord G* incluindo a própria célula, mantém células
-  com contagem zero e aponta pontos quentes/frios. Os p-valores bilaterais são
-  ajustados por Benjamini-Hochberg; ainda assim, trate a análise como
-  exploratória.
+  com contagem zero e aponta pontos quentes/frios. Os p-valores vêm de uma
+  simulação condicional à área observada de cada célula e são ajustados por
+  Benjamini-Hochberg; ainda assim, trate a análise como exploratória.
 - `lisa`: classifica os quatro quadrantes alto-alto, baixo-baixo, alto-baixo e
-  baixo-alto usando o valor centrado e seu lag espacial. Os p-valores também
-  recebem ajuste Benjamini-Hochberg.
+  baixo-alto usando a densidade centrada e seu lag espacial. Os p-valores usam
+  a mesma referência condicional à área e também recebem ajuste BH.
 - `ripley_k`: pergunta, em várias escalas, *"os serviços se agrupam mais do que
-  o acaso?"* — útil para escolher o raio de análise.
+  o acaso?"*. Sem envelope de simulação, a curva é apenas diagnóstica e não
+  sustenta uma conclusão de significância em cada distância.
 - `moran`: pergunta *"os serviços estão mais agrupados do que o acaso?"*. A
-  versão padrão aplica Moran's I às **contagens por célula hexagonal** (a
-  aplicação estatisticamente correta para pontos); a versão sobre a distância
-  radial (argumento `sobre_grade = FALSE`) fica como diagnóstico, com ressalva.
-- `moran_distrital`: o mesmo diagnóstico, mas agregado por distrito — mais
-  estável e interpretável para políticas públicas.
-- `por_distrito`: conta e mapeia os serviços por distrito da cidade.
+  versão padrão aplica Moran's I às **densidades por célula hexagonal** e
+  calibra o p-valor simulando contagens proporcionais às áreas recortadas; a
+  versão sobre a distância radial (`sobre_grade = FALSE`) fica apenas como
+  diagnóstico, com ressalva.
+- `moran_distrital`: usa densidade e áreas distritais recortadas pela janela da
+  consulta, com a mesma calibração condicional à exposição.
+- `por_distrito`: conta e mapeia somente as partes dos distritos efetivamente
+  incluídas na janela da consulta.
 - `cobertura_populacional`: estima a população dentro do raio de busca.
 - `rede_viaria`: compara o "voo do pássaro" (linha reta) com o caminho real de
   carro/pé.
+
+As análises que dependem de uma janela observacional (`nni`, `voronoi`, grade,
+Ripley, cobertura e análises distritais) não são executadas se
+`n_por_camada` realmente tiver omitido ocorrências. Resultados selecionados por
+`rede_viaria` também são recusados nessas análises enquanto não houver uma
+isócrona; um raio de rota não corresponde a um círculo em linha reta.
 
 ### 10.11 Tabela-resumo das funções do módulo 🧰
 
@@ -712,6 +722,10 @@ gs_salvar_analises(
 )
 ```
 
+Cada pasta de origem também contém `metadados_consulta.csv` (métrica,
+backend, raio, limite e indicador de truncamento) e
+`amostragem_por_camada.csv` (quantidades disponíveis, retidas e omitidas).
+
 ### 10.13 Limitações conhecidas ⚠️
 
 - O índice local cobre apenas os CEPs dos equipamentos públicos (≈7 mil) —
@@ -732,6 +746,16 @@ gs_salvar_analises(
 - `moran` (sobre grade hexagonal) depende do tamanho da célula
   (`celula_m`); resultados podem variar com a escolha da grade. A versão
   sobre a distância radial (`sobre_grade = FALSE`) fica como diagnóstico.
+- A simulação por área corrige a exposição desigual das células/distritos
+  recortados, mas não elimina sensibilidade à grade ou aos limites
+  administrativos (MAUP).
+- NNI e Ripley pressupõem um processo pontual homogêneo. Misturar categorias
+  de serviço com intensidades muito diferentes pode parecer agrupamento;
+  analise camadas separadamente quando a pergunta exigir inferência.
+- A janela radial não é automaticamente recortada pelo limite municipal nem
+  pela cobertura específica de cada cadastro. Consultas próximas à borda da
+  cidade exigem uma máscara de cobertura adequada antes de interpretação
+  inferencial.
 
 ---
 

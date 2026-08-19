@@ -79,7 +79,20 @@ gs_dominio_consulta <- function(resultado, ponto = NULL, raio_m = NULL) {
   } else {
     as.character(tipo_distancia[1])
   }
-  dominio <- if (identical(tipo_distancia, "manhattan")) {
+  dominio <- if (tipo_distancia %in% c("geodesica", "haversine")) {
+    tryCatch({
+      raio_esfera <- if (identical(tipo_distancia, "haversine")) {
+        6371000
+      } else {
+        s2::s2_earth_radius_meters()
+      }
+      circulo <- s2::s2_buffer_cells(
+        s2::as_s2_geography(sf::st_transform(ponto_sf, gs_epsg$wgs84)),
+        distance = raio_m, max_cells = 10000, radius = raio_esfera
+      )
+      sf::st_transform(sf::st_as_sfc(circulo), gs_epsg$oficial)
+    }, error = function(e) NULL)
+  } else if (identical(tipo_distancia, "manhattan")) {
     centro <- sf::st_coordinates(ponto_utm)[1, ]
     sf::st_sfc(sf::st_polygon(list(rbind(
       centro + c(0, raio_m), centro + c(raio_m, 0),
@@ -114,6 +127,53 @@ gs_com_seed <- function(seed, expr) {
   }, add = TRUE)
   set.seed(seed)
   force(expr)
+}
+
+gs_simular_taxas_area <- function(contagens, areas, nsim, seed = 123) {
+  contagens <- suppressWarnings(as.integer(contagens))
+  areas <- suppressWarnings(as.numeric(areas))
+  if (length(contagens) != length(areas) || length(areas) < 2 ||
+      any(!is.finite(areas)) || any(areas <= 0) ||
+      any(!is.finite(contagens)) || any(contagens < 0)) {
+    stop("Contagens e áreas inválidas para a simulação espacial.")
+  }
+  total <- sum(contagens)
+  if (total < 1) stop("Nenhuma ocorrência disponível para a simulação espacial.")
+  simuladas <- gs_com_seed(seed, stats::rmultinom(
+    n = nsim, size = total, prob = areas / sum(areas)
+  ))
+  sweep(simuladas, 1, areas, "/")
+}
+
+gs_pvalor_mc_bilateral <- function(observado, simulados) {
+  simulados <- suppressWarnings(as.numeric(simulados))
+  simulados <- simulados[is.finite(simulados)]
+  if (!is.finite(observado) || length(simulados) < 1) return(NA_real_)
+  centro <- mean(simulados)
+  (1 + sum(abs(simulados - centro) >= abs(observado - centro))) /
+    (length(simulados) + 1)
+}
+
+gs_pvalores_locais_mc <- function(observados, simulados) {
+  observados <- suppressWarnings(as.numeric(observados))
+  simulados <- as.matrix(simulados)
+  vapply(seq_along(observados), function(i) {
+    gs_pvalor_mc_bilateral(observados[i], simulados[i, ])
+  }, numeric(1))
+}
+
+gs_ajustar_p_finitos <- function(p, metodo = "BH") {
+  p <- suppressWarnings(as.numeric(p))
+  ajustado <- rep(NA_real_, length(p))
+  validos <- is.finite(p)
+  ajustado[validos] <- stats::p.adjust(p[validos], method = metodo)
+  ajustado
+}
+
+gs_moran_i <- function(x, lw) {
+  unname(spdep::moran(
+    x, lw, n = length(x), S0 = spdep::Szero(lw), zero.policy = FALSE
+  )$I)
 }
 
 gs_resumo_distancias <- function(x) {
@@ -485,6 +545,8 @@ gs_analise_moran <- function(resultado, celula_m = gs_celula_hex_m,
     return(list(executado = FALSE,
                 mensagem = "`nsim` e `seed` devem ser números inteiros válidos."))
   }
+  dominio_validacao <- gs_dominio_consulta(resultado, ponto, raio_m)
+  if (!isTRUE(dominio_validacao$executado)) return(dominio_validacao)
 
   if (sobre_grade) {
     grade <- gs_grade_hex(resultado, celula_m, ponto = ponto, raio_m = raio_m)
@@ -512,19 +574,26 @@ gs_analise_moran <- function(resultado, celula_m = gs_celula_hex_m,
       return(list(executado = FALSE,
                   mensagem = "Não foi possível construir os pesos espaciais da grade."))
     }
-    teste <- tryCatch(
-      gs_com_seed(seed, spdep::moran.mc(
-        x, lw, nsim = nsim, zero.policy = FALSE, alternative = "two.sided"
-      )),
-      error = function(e) NULL
-    )
-    if (is.null(teste) || !is.finite(unname(teste$statistic)) ||
-        !is.finite(teste$p.value)) {
+    moran_i <- tryCatch(gs_moran_i(x, lw), error = function(e) NA_real_)
+    simulados <- tryCatch({
+      taxas <- gs_simular_taxas_area(
+        grade$n_servicos, grade$area_observada_km2, nsim, seed
+      )
+      apply(taxas, 2, function(x_sim) {
+        tryCatch(gs_moran_i(x_sim, lw), error = function(e) NA_real_)
+      })
+    }, error = function(e) NULL)
+    valor_p <- if (is.null(simulados)) NA_real_ else
+      gs_pvalor_mc_bilateral(moran_i, simulados)
+    if (!is.finite(moran_i) || !is.finite(valor_p)) {
       return(list(executado = FALSE,
-                  mensagem = "Falha ao executar Moran's I (configuração de vizinhança inválida)."))
+                  mensagem = paste0(
+                    "Falha ao executar Moran's I com a simulação condicional ",
+                    "à área observada."
+                  )))
     }
-    moran_i <- unname(teste$statistic)
-    valor_p <- teste$p.value
+    teste <- list(statistic = moran_i, p.value = valor_p,
+                  simulated = simulados)
     interpretacao <- if (valor_p < 0.05 && moran_i > 0) {
       "Há autocorrelação espacial positiva: células vizinhas tendem a ter densidades de serviços semelhantes (agrupamento)."
     } else if (valor_p < 0.05 && moran_i < 0) {
@@ -538,7 +607,8 @@ gs_analise_moran <- function(resultado, celula_m = gs_celula_hex_m,
       n_celulas = nrow(grade),
       n_celulas_ocupadas = sum(grade$n_servicos > 0),
       variavel = "densidade_por_km2",
-      metodo_p = "Monte Carlo bilateral", nsim = nsim, seed = seed,
+      metodo_p = "Monte Carlo bilateral condicional à área",
+      nsim = sum(is.finite(simulados)), seed = seed,
       interpretacao = interpretacao,
       objeto = teste
     ))
@@ -600,6 +670,18 @@ gs_analise_moran <- function(resultado, celula_m = gs_celula_hex_m,
       "Vizinhança com %d sub-grafo(s) desconexo(s); os resultados locais nesses sub-grafos não são confiáveis.",
       ncomp$nc))
   }
+  max_permutacoes <- if (nrow(d) <= 8) {
+    max(1, as.integer(factorial(nrow(d)) - 1))
+  } else {
+    nsim
+  }
+  nsim_efetivo <- min(nsim, max_permutacoes)
+  if (nsim_efetivo < nsim) {
+    avisos <- c(avisos, sprintf(
+      "Número de permutações reduzido de %d para %d para %d pontos.",
+      nsim, nsim_efetivo, nrow(d)
+    ))
+  }
   lw <- tryCatch(spdep::nb2listw(nb, style = "W", zero.policy = FALSE),
                  error = function(e) NULL)
   if (is.null(lw)) {
@@ -608,7 +690,7 @@ gs_analise_moran <- function(resultado, celula_m = gs_celula_hex_m,
   }
   teste <- tryCatch(
     gs_com_seed(seed, spdep::moran.mc(
-      d$distancia_m, lw, nsim = nsim, zero.policy = FALSE,
+      d$distancia_m, lw, nsim = nsim_efetivo, zero.policy = FALSE,
       alternative = "two.sided"
     )),
     error = function(e) NULL
@@ -634,7 +716,7 @@ gs_analise_moran <- function(resultado, celula_m = gs_celula_hex_m,
     valor_p   = round(valor_p, 4),
     n_pontos  = nrow(d),
     n_deduplicados = n_dup,
-    metodo_p = "Monte Carlo bilateral", nsim = nsim, seed = seed,
+    metodo_p = "Monte Carlo bilateral", nsim = nsim_efetivo, seed = seed,
     avisos    = c(avisos, paste0(
       "Moran aplicado à distância radial tem gradiente espacial construído ",
       "(distância a um único ponto) e tende a indicar agrupamento por ",
@@ -947,7 +1029,7 @@ gs_analise_nni <- function(resultado, ponto = NULL, raio_m = NULL,
   }
   esperado <- 0.5 * sqrt(area / n)
   se <- 0.26136 * sqrt(area / n^2)
-  R <- obs / esperado
+  R_analitico <- obs / esperado
   z <- if (is.finite(se) && se > 0) (obs - esperado) / se else NA_real_
   pvalor <- if (is.finite(z)) 2 * stats::pnorm(-abs(z)) else NA_real_
   metodo_p <- "aproximação normal"
@@ -955,9 +1037,10 @@ gs_analise_nni <- function(resultado, ponto = NULL, raio_m = NULL,
 
   if (nsim >= 19 && n <= 500) {
     simulados <- tryCatch(gs_com_seed(seed, replicate(nsim, {
-      raios <- dominio$raio_m * sqrt(stats::runif(n))
-      angulos <- stats::runif(n, 0, 2 * pi)
-      xy <- cbind(raios * cos(angulos), raios * sin(angulos))
+      amostra <- suppressWarnings(sf::st_sample(
+        dominio$dominio, size = n, type = "random", exact = TRUE
+      ))
+      xy <- sf::st_coordinates(amostra)
       dm <- as.matrix(stats::dist(xy))
       diag(dm) <- Inf
       mean(apply(dm, 1, min))
@@ -971,14 +1054,15 @@ gs_analise_nni <- function(resultado, ponto = NULL, raio_m = NULL,
       p_inferior <- (1 + sum(simulados <= obs)) / (nsim + 1)
       p_superior <- (1 + sum(simulados >= obs)) / (nsim + 1)
       pvalor <- min(1, 2 * min(p_inferior, p_superior))
-      metodo_p <- "Monte Carlo bilateral no buffer circular"
+      metodo_p <- "Monte Carlo bilateral na janela observacional"
     }
   }
   referencia <- if (is.finite(esperado_mc)) esperado_mc else esperado
+  R <- obs / referencia
   interpretacao <- if (is.finite(pvalor) && pvalor < 0.05 && obs < referencia) {
     "Agrupado"
   } else if (is.finite(pvalor) && pvalor < 0.05 && obs > referencia) {
-    "Disperso (uniforme)"
+    "Regular/inibido"
   } else {
     "Compatível com aleatoriedade espacial"
   }
@@ -992,7 +1076,7 @@ gs_analise_nni <- function(resultado, ponto = NULL, raio_m = NULL,
     avisos <- c(avisos, sprintf(
       "%d ponto(s) fora do buffer da consulta foram ignorados.", n_fora))
   }
-  if (!identical(metodo_p, "Monte Carlo bilateral no buffer circular")) {
+  if (!grepl("Monte Carlo", metodo_p, fixed = TRUE)) {
     avisos <- c(avisos,
                 "P-valor analítico sem correção explícita do efeito de borda.")
   }
@@ -1000,12 +1084,14 @@ gs_analise_nni <- function(resultado, ponto = NULL, raio_m = NULL,
     executado = TRUE, n = n,
     n_deduplicados = n_dup,
     distancia_observada_m = round(obs, 1),
-    distancia_esperada_m = round(esperado, 1),
+    distancia_esperada_m = round(referencia, 1),
+    distancia_esperada_analitica_m = round(esperado, 1),
     distancia_esperada_mc_m = round(esperado_mc, 1),
-    indice_nni = round(R, 3), z = round(z, 2),
+    indice_nni = round(R, 3), indice_nni_analitico = round(R_analitico, 3),
+    z = round(z, 2),
     valor_p = round(pvalor, 4), area_km2 = round(area / 1e6, 2),
     metodo_p = metodo_p, nsim = if (grepl("Monte Carlo", metodo_p)) nsim else 0L,
-    seed = seed,
+    seed = seed, tipo_janela = dominio$tipo_distancia,
     interpretacao = interpretacao,
     avisos = avisos
   )
@@ -1066,6 +1152,7 @@ gs_grade_hex <- function(resultado, celula_m = gs_celula_hex_m,
 
   if (!is.data.frame(resultado) || nrow(resultado) == 0) {
     attr(grade_sf, "raio_m") <- dominio$raio_m
+    attr(grade_sf, "n_atribuicoes_ambiguas") <- 0L
     return(grade_sf)
   }
   if (!all(c("longitude", "latitude") %in% names(resultado))) {
@@ -1080,6 +1167,7 @@ gs_grade_hex <- function(resultado, celula_m = gs_celula_hex_m,
   dados$latitude <- lat[validos]
   if (nrow(dados) == 0) {
     attr(grade_sf, "raio_m") <- dominio$raio_m
+    attr(grade_sf, "n_atribuicoes_ambiguas") <- 0L
     return(grade_sf)
   }
   pts_utm <- tryCatch(
@@ -1111,6 +1199,7 @@ gs_grade_hex <- function(resultado, celula_m = gs_celula_hex_m,
     if (length(valores) == 0) NA_character_ else paste(valores, collapse = ", ")
   }, character(1))
   attr(grade_sf, "raio_m") <- dominio$raio_m
+  attr(grade_sf, "n_atribuicoes_ambiguas") <- sum(lengths(candidatas) > 1)
   grade_sf
 }
 
@@ -1129,7 +1218,7 @@ gs_mapa_grade_classe <- function(grade, titulo) {
   cores <- c("ponto quente" = "#d7301f", "ponto frio" = "#0570b0",
               "alto-alto" = "#d7301f", "baixo-baixo" = "#0570b0",
               "alto-baixo" = "#fc8d59", "baixo-alto" = "#74add1",
-              "não significativo" = "grey85")
+              "não significativo" = "grey85", "não avaliável" = "grey40")
   ggplot2::ggplot(grade) +
     ggplot2::geom_sf(ggplot2::aes(fill = classe), color = "white", linewidth = 0.1) +
     ggplot2::scale_fill_manual(values = cores) +
@@ -1143,6 +1232,8 @@ gs_classificar_lisa <- function(valor_centrado, lag_espacial, p_ajustado,
     is.finite(valor_centrado) & is.finite(lag_espacial) &
     valor_centrado != 0 & lag_espacial != 0
   classe <- rep("não significativo", length(valor_centrado))
+  classe[!is.finite(p_ajustado) | !is.finite(valor_centrado) |
+           !is.finite(lag_espacial)] <- "não avaliável"
   classe[significativo & valor_centrado > 0 & lag_espacial > 0] <- "alto-alto"
   classe[significativo & valor_centrado < 0 & lag_espacial < 0] <- "baixo-baixo"
   classe[significativo & valor_centrado > 0 & lag_espacial < 0] <- "alto-baixo"
@@ -1152,10 +1243,18 @@ gs_classificar_lisa <- function(valor_centrado, lag_espacial, p_ajustado,
 
 # --- Getis-Ord (G* local) — aglomerados quentes/frios — requer spdep ------------
 gs_analise_getis_ord <- function(resultado, celula_m = gs_celula_hex_m,
-                                 ponto = NULL, raio_m = NULL) {
+                                 ponto = NULL, raio_m = NULL,
+                                 nsim = 499, seed = 123) {
   if (!requireNamespace("spdep", quietly = TRUE)) {
     return(list(executado = FALSE,
                 mensagem = "Pacote 'spdep' não instalado. Instale com: install.packages('spdep')"))
+  }
+  nsim <- suppressWarnings(as.integer(nsim)[1])
+  seed_valido <- is.null(seed) ||
+    (length(seed) > 0 && is.finite(suppressWarnings(as.numeric(seed)[1])))
+  if (!is.finite(nsim) || nsim < 19 || !seed_valido) {
+    return(list(executado = FALSE,
+                mensagem = "`nsim` deve ser >= 19 e `seed`, um inteiro válido."))
   }
   grade <- gs_grade_hex(resultado, celula_m, ponto = ponto, raio_m = raio_m)
   if (!inherits(grade, "sf")) return(grade)
@@ -1200,27 +1299,55 @@ gs_analise_getis_ord <- function(resultado, celula_m = gs_celula_hex_m,
     return(list(executado = FALSE,
                 mensagem = "Getis-Ord G* sem variância local definida."))
   }
-  grade$p_valor <- ifelse(is.finite(grade$gi_z),
-                           2 * stats::pnorm(-abs(grade$gi_z)), 1)
-  grade$p_ajustado <- stats::p.adjust(grade$p_valor, method = "BH")
+  gi_simulados <- tryCatch({
+    taxas <- gs_simular_taxas_area(
+      grade$n_servicos, grade$area_observada_km2, nsim, seed
+    )
+    vapply(seq_len(nsim), function(i) {
+      tryCatch(as.numeric(spdep::localG(
+        taxas[, i], lw, zero.policy = FALSE
+      )), error = function(e) rep(NA_real_, nrow(grade)))
+    }, numeric(nrow(grade)))
+  }, error = function(e) NULL)
+  if (is.null(gi_simulados)) {
+    return(list(executado = FALSE,
+                mensagem = "Falha na simulação de referência do Getis-Ord G*."))
+  }
+  grade$p_valor <- gs_pvalores_locais_mc(grade$gi_z, gi_simulados)
+  grade$p_ajustado <- gs_ajustar_p_finitos(grade$p_valor, metodo = "BH")
   grade$p_valor_ajustado <- grade$p_ajustado
-  grade$classe <- ifelse(grade$p_ajustado < 0.05 & grade$gi_z > 0,
-                          "ponto quente",
-                   ifelse(grade$p_ajustado < 0.05 & grade$gi_z < 0,
-                          "ponto frio", "não significativo"))
+  grade$classe <- rep("não significativo", nrow(grade))
+  grade$classe[!is.finite(grade$p_ajustado) | !is.finite(grade$gi_z)] <-
+    "não avaliável"
+  grade$classe[is.finite(grade$p_ajustado) & grade$p_ajustado < 0.05 &
+                  grade$gi_z > 0] <- "ponto quente"
+  grade$classe[is.finite(grade$p_ajustado) & grade$p_ajustado < 0.05 &
+                  grade$gi_z < 0] <- "ponto frio"
   list(executado = TRUE, celula_m = celula_m,
        grade = grade, variavel = "densidade_por_km2",
-       inclui_self = TRUE, correcao_p = "BH",
-       avisos = "P-valores bilaterais ajustados por Benjamini-Hochberg; a análise permanece exploratória.",
+       inclui_self = TRUE, correcao_p = "BH", nsim = nsim, seed = seed,
+       metodo_p = "Monte Carlo bilateral condicional à área",
+       avisos = paste0(
+         "P-valores de Monte Carlo condicionais à área, ajustados por ",
+         "Benjamini-Hochberg; a análise permanece exploratória."
+       ),
        mapa = gs_mapa_grade_classe(grade, "Getis-Ord (G*) por célula"))
 }
 
 # --- LISA (Moran local) — aglomerados alto-alto / baixo-baixo — requer spdep ----
 gs_analise_lisa <- function(resultado, celula_m = gs_celula_hex_m,
-                            ponto = NULL, raio_m = NULL) {
+                            ponto = NULL, raio_m = NULL,
+                            nsim = 499, seed = 123) {
   if (!requireNamespace("spdep", quietly = TRUE)) {
     return(list(executado = FALSE,
                 mensagem = "Pacote 'spdep' não instalado. Instale com: install.packages('spdep')"))
+  }
+  nsim <- suppressWarnings(as.integer(nsim)[1])
+  seed_valido <- is.null(seed) ||
+    (length(seed) > 0 && is.finite(suppressWarnings(as.numeric(seed)[1])))
+  if (!is.finite(nsim) || nsim < 19 || !seed_valido) {
+    return(list(executado = FALSE,
+                mensagem = "`nsim` deve ser >= 19 e `seed`, um inteiro válido."))
   }
   grade <- gs_grade_hex(resultado, celula_m, ponto = ponto, raio_m = raio_m)
   if (!inherits(grade, "sf")) return(grade)
@@ -1254,16 +1381,25 @@ gs_analise_lisa <- function(resultado, celula_m = gs_celula_hex_m,
     return(list(executado = FALSE,
                 mensagem = "Falha ao executar LISA (pouca variância nas células)."))
   }
-  coluna_p <- grep("^Pr\\(", colnames(lm), value = TRUE)[1]
-  if (is.na(coluna_p)) {
-    return(list(executado = FALSE,
-                mensagem = "LISA não retornou p-valores locais."))
-  }
   grade$lisa_i <- as.numeric(lm[, "Ii"])
   grade$lisa_z <- as.numeric(lm[, "Z.Ii"])
-  grade$p_valor <- as.numeric(lm[, coluna_p])
-  grade$p_valor[!is.finite(grade$p_valor)] <- 1
-  grade$p_ajustado <- stats::p.adjust(grade$p_valor, method = "BH")
+  lisa_simulados <- tryCatch({
+    taxas <- gs_simular_taxas_area(
+      grade$n_servicos, grade$area_observada_km2, nsim, seed
+    )
+    vapply(seq_len(nsim), function(i) {
+      tryCatch(as.numeric(spdep::localmoran(
+        taxas[, i], lw, zero.policy = FALSE,
+        alternative = "two.sided"
+      )[, "Ii"]), error = function(e) rep(NA_real_, nrow(grade)))
+    }, numeric(nrow(grade)))
+  }, error = function(e) NULL)
+  if (is.null(lisa_simulados)) {
+    return(list(executado = FALSE,
+                mensagem = "Falha na simulação de referência do LISA."))
+  }
+  grade$p_valor <- gs_pvalores_locais_mc(grade$lisa_i, lisa_simulados)
+  grade$p_ajustado <- gs_ajustar_p_finitos(grade$p_valor, metodo = "BH")
   grade$p_valor_ajustado <- grade$p_ajustado
   grade$valor_centrado <- x - mean(x)
   grade$lag_espacial <- tryCatch(as.numeric(spdep::lag.listw(
@@ -1279,7 +1415,12 @@ gs_analise_lisa <- function(resultado, celula_m = gs_celula_hex_m,
   )
   list(executado = TRUE, celula_m = celula_m,
        grade = grade, variavel = "densidade_por_km2", correcao_p = "BH",
-       avisos = "P-valores bilaterais ajustados por Benjamini-Hochberg; a análise permanece exploratória.",
+       nsim = nsim, seed = seed,
+       metodo_p = "Monte Carlo bilateral condicional à área",
+       avisos = paste0(
+         "P-valores de Monte Carlo condicionais à área, ajustados por ",
+         "Benjamini-Hochberg; a análise permanece exploratória."
+       ),
        mapa = gs_mapa_grade_classe(grade, "LISA por célula"))
 }
 
@@ -1305,10 +1446,14 @@ gs_analise_ripley_k <- function(resultado, rmax_m = NULL, ponto = NULL,
                           crs = gs_epsg$wgs84)
   pts_utm <- sf::st_transform(pts_sf, gs_epsg$oficial)
   coords <- sf::st_coordinates(pts_utm)
-  centro <- sf::st_coordinates(dominio$ponto)[1, ]
-  win <- spatstat.geom::disc(
-    radius = dominio$raio_m, centre = c(centro[1], centro[2])
+  win <- tryCatch(
+    spatstat.geom::as.owin(sf::st_geometry(dominio$dominio)),
+    error = function(e) NULL
   )
+  if (is.null(win)) {
+    return(list(executado = FALSE,
+                mensagem = "Não foi possível converter a janela observacional para a função K."))
+  }
   dentro <- spatstat.geom::inside.owin(coords[, 1], coords[, 2], w = win)
   coords <- coords[dentro, , drop = FALSE]
   if (nrow(coords) < 4) {
@@ -1342,9 +1487,11 @@ gs_analise_ripley_k <- function(resultado, rmax_m = NULL, ponto = NULL,
     ggplot2::geom_line(color = "#0570b0", linewidth = 0.9) +
     ggplot2::labs(x = "Distância r (m)", y = "L(r) - r (m)",
                   title = "Função K de Ripley transformada",
-                  subtitle = "Valores positivos sugerem agrupamento; negativos, dispersão") +
+                   subtitle = "Diagnóstico sem envelope: desvios de zero não implicam significância") +
     ggplot2::theme_minimal()
   list(executado = TRUE, n = ppp$n, raio_dominio_m = dominio$raio_m,
+       area_dominio_km2 = as.numeric(sf::st_area(dominio$dominio)) / 1e6,
+       tipo_janela = dominio$tipo_distancia,
        correcao = coluna, curva = df, objeto = K, grafico = grafico,
        avisos = paste0(
          "Diagnóstico exploratório multiescala; sem envelope de simulação, ",
@@ -1475,7 +1622,9 @@ gs_distritos_no_dominio <- function(resultado, dir = gs_pasta_dados(),
   dist$.dominio <- NULL
   list(
     executado = TRUE, distritos = dist,
-    n_sem_distrito = sum(is.na(atribuicao)), raio_m = dominio$raio_m
+    n_sem_distrito = sum(is.na(atribuicao)),
+    n_atribuicoes_ambiguas = sum(lengths(candidatos) > 1),
+    raio_m = dominio$raio_m, tipo_janela = dominio$tipo_distancia
   )
 }
 
@@ -1496,6 +1645,7 @@ gs_analise_por_distrito <- function(resultado, dir = gs_pasta_dados(),
     )
   list(executado = TRUE, raio_m = cruzamento$raio_m,
        n_sem_distrito = cruzamento$n_sem_distrito,
+       n_atribuicoes_ambiguas = cruzamento$n_atribuicoes_ambiguas,
        por_distrito = sf::st_drop_geometry(dist), mapa = mapa)
 }
 
@@ -1510,9 +1660,9 @@ gs_analise_moran_distrital <- function(resultado, dir = gs_pasta_dados(),
   nsim <- suppressWarnings(as.integer(nsim)[1])
   seed_valido <- is.null(seed) ||
     (length(seed) > 0 && is.finite(suppressWarnings(as.numeric(seed)[1])))
-  if (!is.finite(nsim) || nsim < 1 || !seed_valido) {
+  if (!is.finite(nsim) || nsim < 19 || !seed_valido) {
     return(list(executado = FALSE,
-                mensagem = "`nsim` e `seed` devem ser números inteiros válidos."))
+                mensagem = "`nsim` deve ser >= 19 e `seed`, um inteiro válido."))
   }
   cruzamento <- gs_distritos_no_dominio(resultado, dir, ponto, raio_m)
   if (!isTRUE(cruzamento$executado)) return(cruzamento)
@@ -1539,15 +1689,25 @@ gs_analise_moran_distrital <- function(resultado, dir = gs_pasta_dados(),
     return(list(executado = FALSE,
                 mensagem = "Não foi possível construir os pesos distritais."))
   }
-  teste <- tryCatch(gs_com_seed(seed, spdep::moran.mc(
-    x, lw, nsim = nsim, zero.policy = FALSE,
-    alternative = "two.sided"
-  )), error = function(e) NULL)
-  if (is.null(teste) || !is.finite(unname(teste$statistic)) ||
-      !is.finite(teste$p.value)) {
+  moran_i <- tryCatch(gs_moran_i(x, lw), error = function(e) NA_real_)
+  taxas_simuladas <- tryCatch(gs_simular_taxas_area(
+    dist$n_servicos, dist$area_observada_km2, nsim, seed
+  ), error = function(e) NULL)
+  moran_simulados <- if (is.null(taxas_simuladas)) NULL else
+    apply(taxas_simuladas, 2, function(x_sim) {
+      tryCatch(gs_moran_i(x_sim, lw), error = function(e) NA_real_)
+    })
+  valor_p <- if (is.null(moran_simulados)) NA_real_ else
+    gs_pvalor_mc_bilateral(moran_i, moran_simulados)
+  if (!is.finite(moran_i) || !is.finite(valor_p)) {
     return(list(executado = FALSE,
-                mensagem = "Falha ao executar Moran distrital (vizinhança inválida)."))
+                mensagem = paste0(
+                  "Falha ao executar Moran distrital com a simulação ",
+                  "condicional à área observada."
+                )))
   }
+  teste <- list(statistic = moran_i, p.value = valor_p,
+                simulated = moran_simulados)
   lm <- tryCatch(spdep::localmoran(
     x, lw, zero.policy = FALSE, alternative = "two.sided"
   ), error = function(e) NULL)
@@ -1555,16 +1715,16 @@ gs_analise_moran_distrital <- function(resultado, dir = gs_pasta_dados(),
     return(list(executado = FALSE,
                 mensagem = "Falha ao executar LISA distrital."))
   }
-  coluna_p <- grep("^Pr\\(", colnames(lm), value = TRUE)[1]
-  if (is.na(coluna_p)) {
-    return(list(executado = FALSE,
-                mensagem = "LISA distrital não retornou p-valores locais."))
-  }
   dist$lisa_i <- as.numeric(lm[, "Ii"])
   dist$lisa_z <- as.numeric(lm[, "Z.Ii"])
-  dist$p_valor <- as.numeric(lm[, coluna_p])
-  dist$p_valor[!is.finite(dist$p_valor)] <- 1
-  dist$p_ajustado <- stats::p.adjust(dist$p_valor, method = "BH")
+  lisa_simulados <- vapply(seq_len(nsim), function(i) {
+    tryCatch(as.numeric(spdep::localmoran(
+      taxas_simuladas[, i], lw, zero.policy = FALSE,
+      alternative = "two.sided"
+    )[, "Ii"]), error = function(e) rep(NA_real_, nrow(dist)))
+  }, numeric(nrow(dist)))
+  dist$p_valor <- gs_pvalores_locais_mc(dist$lisa_i, lisa_simulados)
+  dist$p_ajustado <- gs_ajustar_p_finitos(dist$p_valor, metodo = "BH")
   dist$p_valor_ajustado <- dist$p_ajustado
   dist$valor_centrado <- x - mean(x)
   dist$lag_espacial <- tryCatch(as.numeric(spdep::lag.listw(
@@ -1582,17 +1742,19 @@ gs_analise_moran_distrital <- function(resultado, dir = gs_pasta_dados(),
     ggplot2::scale_fill_manual(
       values = c("alto-alto" = "#d7301f", "baixo-baixo" = "#0570b0",
                  "alto-baixo" = "#fc8d59", "baixo-alto" = "#74add1",
-                 "não significativo" = "grey85")) +
+                 "não significativo" = "grey85", "não avaliável" = "grey40")) +
     gs_tema_mapa() +
     ggplot2::labs(
       title = "Moran local da densidade distrital no domínio", fill = "Classe"
     )
   list(executado = TRUE,
-       moran_i = unname(teste$statistic),
-       valor_p = teste$p.value,
-       metodo_p = "Monte Carlo bilateral", nsim = nsim, seed = seed,
+       moran_i = moran_i, valor_p = valor_p,
+       metodo_p = "Monte Carlo bilateral condicional à área",
+       nsim = sum(is.finite(moran_simulados)), seed = seed,
        variavel = "densidade_por_km2", correcao_p_local = "BH",
        n_distritos = nrow(dist), raio_m = cruzamento$raio_m,
+       tipo_janela = cruzamento$tipo_janela,
+       n_atribuicoes_ambiguas = cruzamento$n_atribuicoes_ambiguas,
        por_distrito = sf::st_drop_geometry(dist),
        mapa = mapa, objeto = teste)
 }
@@ -1855,9 +2017,13 @@ gs_interpretar_analise <- function(analises, resultado, raio_m) {
   if (!is.null(analises$nni) && isTRUE(analises$nni$executado)) {
     n <- analises$nni
     out$nni <- fmt(
-      "Índice de Vizinho Mais Próximo: R = %.2f (%s) com z = %.2f e p = %.3f. A distância média observada ao vizinho mais próximo é %.1f m (esperada: %.1f m).",
+      paste0(
+        "Índice de Vizinho Mais Próximo: R = %.2f (%s) com z = %.2f e ",
+        "p = %.3f pelo método %s. A distância média observada ao vizinho ",
+        "mais próximo é %.1f m (referência simulada/analítica: %.1f m)."
+      ),
       n$indice_nni, n$interpretacao, n$z, n$valor_p,
-      n$distancia_observada_m, n$distancia_esperada_m)
+      n$metodo_p, n$distancia_observada_m, n$distancia_esperada_m)
   }
 
   # Nota: usa [[ ]] (não $) para evitar partial matching — "$moran" casaria
@@ -1865,8 +2031,8 @@ gs_interpretar_analise <- function(analises, resultado, raio_m) {
   if (!is.null(analises[["moran"]]) && isTRUE(analises[["moran"]]$executado)) {
     m <- analises[["moran"]]
     out$moran <- fmt(
-      "Moran's I (método: %s): I = %.4f, p = %.4f. %s",
-      m$metodo, m$moran_i, m$valor_p, m$interpretacao)
+      "Moran's I (método: %s; inferência: %s): I = %.4f, p = %.4f. %s",
+      m$metodo, m$metodo_p, m$moran_i, m$valor_p, m$interpretacao)
   }
 
   if (!is.null(analises[["moran_distrital"]]) &&
@@ -1876,8 +2042,12 @@ gs_interpretar_analise <- function(analises, resultado, raio_m) {
                     c("alto-alto", "baixo-baixo", "alto-baixo", "baixo-alto"),
                   na.rm = TRUE)
     out$moran_distrital <- fmt(
-      "Moran's I agregado por distrito: I = %.4f, p = %.4f. %d distrito(s) foram sinalizados em quadrantes LISA após ajuste BH.",
-      md$moran_i, md$valor_p, n_lisa)
+      paste0(
+        "Moran's I da densidade nas partes distritais observadas: I = %.4f, ",
+        "p = %.4f (%s). %d distrito(s) foram sinalizados em quadrantes ",
+        "LISA após ajuste BH."
+      ),
+      md$moran_i, md$valor_p, md$metodo_p, n_lisa)
   }
 
   if (!is.null(analises[["getis_ord"]]) && isTRUE(analises[["getis_ord"]]$executado)) {
@@ -1911,7 +2081,11 @@ gs_interpretar_analise <- function(analises, resultado, raio_m) {
         "(não informado)"
       }
       out$por_distrito <- fmt(
-        "Serviços distribuídos em %d distrito(s) da cidade. O distrito com mais serviços é %s (%d serviço(s), densidade de %.2f por km²).",
+        paste0(
+          "Serviços distribuídos nas partes observadas de %d distrito(s). ",
+          "A parte distrital com mais serviços é %s (%d serviço(s), ",
+          "densidade de %.2f por km² observado)."
+        ),
         sum(pd$n_servicos > 0), nome_distrito, top$n_servicos,
         top$densidade_por_km2)
     }
@@ -1957,9 +2131,9 @@ gs_interpretar_analise <- function(analises, resultado, raio_m) {
 
   if (!is.null(analises$ripley_k) && isTRUE(analises$ripley_k$executado)) {
     out$ripley_k <- paste0(
-      "A função K de Ripley compara a agregação observada com o padrão aleatório ",
-      "em múltiplas escalas: quando a curva observada fica acima da esperada, ",
-      "há agrupamento naquela escala.")
+      "A função K de Ripley é apresentada como diagnóstico multiescala na ",
+      "janela observacional. Sem envelope de simulação, desvios da referência ",
+      "não constituem evidência formal de agrupamento ou inibição.")
   }
 
   out

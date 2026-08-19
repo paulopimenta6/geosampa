@@ -152,6 +152,8 @@ saidas/comparacao_saude/
 └── origens/
     └── cep_05508090/
         ├── servicos_proximos.csv
+        ├── metadados_consulta.csv
+        ├── amostragem_por_camada.csv
         ├── metricas.csv
         ├── interpretacoes.csv
         ├── manifesto.csv
@@ -166,6 +168,9 @@ saidas/comparacao_saude/
 Todos os objetos `ggplot` encontrados nas análises são persistidos em PNG.
 Objetos `sf` são salvos como GeoJSON e também recebem uma visualização PNG.
 Métricas escalares são normalizadas em `metricas.csv`.
+`metadados_consulta.csv` registra métrica/backend, raio e eventual truncamento;
+`amostragem_por_camada.csv` registra quantos itens estavam disponíveis, foram
+retidos ou omitidos em cada camada.
 
 ## Análises disponíveis
 
@@ -176,16 +181,16 @@ Métricas escalares são normalizadas em `metricas.csv`.
 | `acessibilidade_media` | medidas robustas por camada/tipo e ECDF |
 | `raio_otimo` | raios empíricos P50, P75, P90 e P95 |
 | `raios_progressivos` | oportunidades acumuladas por distância |
-| `cobertura_buffer` | cobertura dos buffers no domínio circular da consulta |
+| `cobertura_buffer` | cobertura dos buffers na janela observacional da consulta |
 | `nni` | padrão pontual com simulação Monte Carlo no domínio da consulta |
 | `voronoi` | células de influência corretamente associadas aos pontos |
 | `kde` / `kde_banda` | densidade em projeção métrica EPSG:31983 |
-| `moran` | Moran global sobre todas as células, inclusive zeros |
-| `getis_ord` | Getis-Ord G* com self e ajuste Benjamini-Hochberg |
-| `lisa` | quatro quadrantes LISA com ajuste Benjamini-Hochberg |
-| `ripley_k` | curva transformada L(r)-r em domínio circular |
-| `por_distrito` | contagem e densidade por distrito |
-| `moran_distrital` | Moran global e LISA distrital |
+| `moran` | Moran global da densidade, com referência condicional à área observada |
+| `getis_ord` | Getis-Ord G* com Monte Carlo por área e ajuste Benjamini-Hochberg |
+| `lisa` | quatro quadrantes LISA com Monte Carlo por área e ajuste BH |
+| `ripley_k` | curva transformada L(r)-r na janela da métrica, sem envelope inferencial |
+| `por_distrito` | contagem e densidade nas partes distritais observadas |
+| `moran_distrital` | Moran global e LISA da densidade distrital observada |
 | `cobertura_populacional` | população estimada por densidade ou camada `sf` |
 | `rede_viaria` | distância OSRM e razão rede/reta |
 
@@ -195,9 +200,18 @@ Métricas escalares são normalizadas em `metricas.csv`.
   não uma amostra aleatória da população.
 - Intervalos da média são descritivos e dependem de hipótese i.i.d.; não medem
   incerteza sobre um cadastro completo.
-- Moran, LISA e Getis-Ord dependem da resolução da grade e do domínio definido.
+- Moran, LISA e Getis-Ord usam densidades e uma referência Monte Carlo
+  condicional à área efetivamente observada de cada célula/distrito.
 - P-valores locais de LISA e Getis-Ord são ajustados por
   Benjamini-Hochberg, mas continuam exploratórios.
+- Análises que exigem janela observacional são bloqueadas quando
+  `n_por_camada` realmente omitiu ocorrências ou quando a seleção usa
+  `rede_viaria` sem uma isócrona.
+- NNI e Ripley assumem CSR homogênea; misturar camadas heterogêneas e escolher
+  uma única resolução de grade pode produzir resultados sensíveis à composição
+  e ao problema da unidade espacial modificável (MAUP).
+- Ripley é diagnóstico: sem envelope de simulação, a curva não fornece teste
+  formal em cada distância.
 - Comparações entre CEPs são descritivas e não representam efeito causal.
 
 ## CEP e precisão

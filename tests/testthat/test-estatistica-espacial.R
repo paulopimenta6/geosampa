@@ -94,6 +94,51 @@ test_that("grade hexagonal cobre o buffer e conserva celulas sem servicos", {
   expect_equal(sum(grade$n_servicos), nrow(resultado))
   expect_equal(sum(as.numeric(sf::st_area(grade))),
                as.numeric(sf::st_area(dominio)), tolerance = 1)
+  expect_equal(grade$densidade_por_km2,
+               grade$n_servicos / grade$area_observada_km2)
+  expect_true(any(grade$fracao_area_observada < 0.5))
+})
+
+test_that("dominio respeita metrica, truncamento e janela da rede", {
+  resultado <- cria_resultado_espacial(
+    rbind(c(0, 0), c(400, 300), c(-500, 200)), raio_m = 1000
+  )
+  attr(resultado, "tipo_distancia") <- "manhattan"
+  dominio <- gs_dominio_consulta(resultado)
+  expect_true(dominio$executado)
+  expect_identical(dominio$tipo_distancia, "manhattan")
+  expect_equal(as.numeric(sf::st_area(dominio$dominio)), 2e6,
+               tolerance = 1)
+
+  truncado <- resultado
+  attr(truncado, "amostra_truncada") <- TRUE
+  expect_false(gs_dominio_consulta(truncado)$executado)
+  expect_match(gs_dominio_consulta(truncado)$mensagem, "truncado")
+
+  rede <- resultado
+  attr(rede, "tipo_distancia") <- "rede_viaria"
+  expect_false(gs_dominio_consulta(rede)$executado)
+  expect_match(gs_dominio_consulta(rede)$mensagem, "isócrona")
+})
+
+test_that("janela esferica contem pontos aceitos pela mesma metrica", {
+  ponto <- sf::st_sfc(sf::st_point(c(-46.63, -23.55)), crs = gs_epsg$wgs84)
+  centro <- sf::st_coordinates(sf::st_transform(ponto, gs_epsg$oficial))[1, ]
+  deslocamentos <- rbind(c(999, 0), c(0, 999), c(-999, 0), c(0, -999))
+  pts <- sf::st_as_sf(
+    data.frame(x = centro[1] + deslocamentos[, 1],
+               y = centro[2] + deslocamentos[, 2]),
+    coords = c("x", "y"), crs = gs_epsg$oficial
+  )
+  pts_wgs <- sf::st_transform(pts, gs_epsg$wgs84)
+  d <- gs_distancias_s2(ponto, pts_wgs)
+  resultado <- cria_resultado_espacial(deslocamentos, raio_m = 1000)
+  attr(resultado, "tipo_distancia") <- "geodesica"
+  dominio <- gs_dominio_consulta(resultado)$dominio
+  dentro <- lengths(sf::st_covered_by(
+    sf::st_transform(pts_wgs[d <= 1000, ], gs_epsg$oficial), dominio
+  )) > 0
+  expect_true(all(dentro))
 })
 
 test_that("Moran global usa toda a grade e Monte Carlo reproduzivel", {
@@ -112,7 +157,8 @@ test_that("Moran global usa toda a grade e Monte Carlo reproduzivel", {
   expect_equal(m1$n_celulas, nrow(grade))
   expect_equal(m1$n_celulas_ocupadas, sum(grade$n_servicos > 0))
   expect_gt(m1$n_celulas, m1$n_celulas_ocupadas)
-  expect_identical(m1$metodo_p, "Monte Carlo bilateral")
+  expect_identical(m1$metodo_p,
+                   "Monte Carlo bilateral condicional à área")
   expect_identical(m1$moran_i, m2$moran_i)
   expect_identical(m1$valor_p, m2$valor_p)
 })
@@ -126,16 +172,19 @@ test_that("Getis-Ord inclui self, usa todas as celulas e ajusta p bilateral", {
   )
   resultado <- cria_resultado_espacial(deslocamentos, raio_m = 2400)
   grade <- gs_grade_hex(resultado, celula_m = 650)
-  g <- gs_analise_getis_ord(resultado, celula_m = 650)
+  g <- gs_analise_getis_ord(resultado, celula_m = 650, nsim = 49, seed = 91)
+  g2 <- gs_analise_getis_ord(resultado, celula_m = 650, nsim = 49, seed = 91)
 
   expect_true(g$executado)
   expect_true(g$inclui_self)
   expect_equal(nrow(g$grade), nrow(grade))
   expect_equal(g$grade$p_ajustado,
-               stats::p.adjust(g$grade$p_valor, method = "BH"))
+               gs_ajustar_p_finitos(g$grade$p_valor))
   finitos <- is.finite(g$grade$gi_z)
-  expect_equal(g$grade$p_valor[finitos],
-               2 * stats::pnorm(-abs(g$grade$gi_z[finitos])))
+  expect_true(all(g$grade$p_valor[finitos] >= 1 / 50))
+  expect_equal(g$grade$p_valor, g2$grade$p_valor)
+  expect_identical(g$metodo_p,
+                   "Monte Carlo bilateral condicional à área")
 })
 
 test_that("LISA usa valor centrado, lag, quatro quadrantes e BH", {
@@ -147,14 +196,16 @@ test_that("LISA usa valor centrado, lag, quatro quadrantes e BH", {
   )
   resultado <- cria_resultado_espacial(deslocamentos, raio_m = 2400)
   grade <- gs_grade_hex(resultado, celula_m = 650)
-  lisa <- gs_analise_lisa(resultado, celula_m = 650)
+  lisa <- gs_analise_lisa(resultado, celula_m = 650, nsim = 49, seed = 91)
 
   expect_true(lisa$executado)
   expect_equal(nrow(lisa$grade), nrow(grade))
   expect_equal(lisa$grade$valor_centrado,
-               lisa$grade$n_servicos - mean(lisa$grade$n_servicos))
+               lisa$grade$densidade_por_km2 -
+                 mean(lisa$grade$densidade_por_km2))
   expect_equal(lisa$grade$p_ajustado,
-               stats::p.adjust(lisa$grade$p_valor, method = "BH"))
+               gs_ajustar_p_finitos(lisa$grade$p_valor))
+  expect_identical(lisa$variavel, "densidade_por_km2")
   expect_equal(
     gs_classificar_lisa(c(1, -1, 1, -1), c(1, -1, -1, 1), rep(0.01, 4)),
     c("alto-alto", "baixo-baixo", "alto-baixo", "baixo-alto")
@@ -192,6 +243,46 @@ test_that("LISA distrital aplica quadrantes e ajuste BH", {
                         md$por_distrito$lag_espacial,
                         md$por_distrito$p_ajustado)
   )
+  expect_identical(md$variavel, "densidade_por_km2")
+  expect_identical(md$metodo_p,
+                   "Monte Carlo bilateral condicional à área")
+})
+
+test_that("distritos usam apenas a area observada no dominio", {
+  distritos <- cria_distritos_teste()
+  rlang::local_bindings(
+    gs_baixar_distritos = function(dir, force = FALSE) distritos,
+    .env = globalenv()
+  )
+  resultado <- cria_resultado_espacial(
+    rbind(c(0, 0), c(500, 0), c(-500, 0)), raio_m = 1000
+  )
+  cruzamento <- gs_distritos_no_dominio(resultado, dir = tempdir())
+  dominio <- gs_dominio_consulta(resultado)$dominio
+
+  expect_true(cruzamento$executado)
+  expect_equal(sum(as.numeric(sf::st_area(cruzamento$distritos))),
+               as.numeric(sf::st_area(dominio)), tolerance = 1)
+  expect_true(any(cruzamento$distritos$fracao_area_observada < 0.5))
+  expect_equal(
+    cruzamento$distritos$densidade_por_km2,
+    cruzamento$distritos$n_servicos /
+      cruzamento$distritos$area_observada_km2
+  )
+})
+
+test_that("ponto em fronteira distrital recebe atribuicao unica e auditavel", {
+  distritos <- cria_distritos_teste()
+  rlang::local_bindings(
+    gs_baixar_distritos = function(dir, force = FALSE) distritos,
+    .env = globalenv()
+  )
+  resultado <- cria_resultado_espacial(matrix(c(450, 0), ncol = 2),
+                                       raio_m = 2000)
+  cruzamento <- gs_distritos_no_dominio(resultado, dir = tempdir())
+  expect_true(cruzamento$executado)
+  expect_equal(sum(cruzamento$distritos$n_servicos), 1)
+  expect_equal(cruzamento$n_atribuicoes_ambiguas, 1)
 })
 
 test_that("NNI trata amostra pequena, duplicatas e dominio circular", {
@@ -215,6 +306,27 @@ test_that("NNI trata amostra pequena, duplicatas e dominio circular", {
   attr(unico, "ponto") <- attr(resultado, "ponto")
   attr(unico, "raio_m") <- attr(resultado, "raio_m")
   expect_false(gs_analise_nni(unico)$executado)
+})
+
+test_that("NNI e Ripley usam a janela Manhattan", {
+  deslocamentos <- rbind(
+    c(-600, 0), c(-300, 200), c(0, 0), c(300, -200),
+    c(600, 0), c(0, 500), c(0, -500)
+  )
+  resultado <- cria_resultado_espacial(deslocamentos, raio_m = 1000)
+  attr(resultado, "tipo_distancia") <- "manhattan"
+  nni <- gs_analise_nni(resultado, nsim = 39, seed = 11)
+  expect_true(nni$executado)
+  expect_identical(nni$tipo_janela, "manhattan")
+  expect_equal(nni$area_km2, 2, tolerance = 0.01)
+  expect_match(nni$metodo_p, "janela observacional")
+
+  skip_if_not_installed("spatstat.geom")
+  skip_if_not_installed("spatstat.explore")
+  ripley <- gs_analise_ripley_k(resultado, rmax_m = 400)
+  expect_true(ripley$executado)
+  expect_identical(ripley$tipo_janela, "manhattan")
+  expect_equal(ripley$area_dominio_km2, 2, tolerance = 0.01)
 })
 
 test_that("cobertura usa buffer da consulta e preserva camadas co-localizadas", {

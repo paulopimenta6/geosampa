@@ -12,7 +12,7 @@ gs_tipos_distancia <- function() {
   data.frame(
     tipo = c("geodesica", "euclidiana", "haversine", "manhattan", "rede_viaria"),
     descricao = c(
-      "Geodésica (elipsoidal) via sf::st_distance em CRS geográfico",
+      "Geodésica esférica via s2, independente da configuração global do sf",
       "Euclidiana em metros na projeção oficial UTM/SIRGAS2000 (EPSG:31983)",
       "Haversine sobre a esfera (aproximação leve em WGS84)",
       "Manhattan (|dx| + |dy|) em metros projetados",
@@ -38,6 +38,15 @@ gs_consultar_tabela_osrm <- function(origem, destinos) {
   osrm::osrmTable(src = origem, dst = destinos, measure = "distance")
 }
 
+gs_distancias_s2 <- function(ponto_sf, pontos_sf) {
+  if (!requireNamespace("s2", quietly = TRUE)) {
+    stop("Pacote 's2' não instalado para a distância geodésica.")
+  }
+  origem <- s2::as_s2_geography(sf::st_transform(ponto_sf, gs_epsg$wgs84))
+  destinos <- s2::as_s2_geography(sf::st_transform(pontos_sf, gs_epsg$wgs84))
+  as.numeric(s2::s2_distance_matrix(origem, destinos)[1, ])
+}
+
 gs_calcular_distancias <- function(ponto_sf, pontos_sf,
                                    tipo_distancia = c("geodesica", "euclidiana",
                                                       "haversine", "manhattan",
@@ -45,7 +54,7 @@ gs_calcular_distancias <- function(ponto_sf, pontos_sf,
   tipo_distancia <- match.arg(tipo_distancia)
   switch(
     tipo_distancia,
-    geodesica = as.numeric(sf::st_distance(ponto_sf, pontos_sf)),
+    geodesica = gs_distancias_s2(ponto_sf, pontos_sf),
     euclidiana = {
       pp <- sf::st_transform(ponto_sf, gs_epsg$oficial)
       qq <- sf::st_transform(pontos_sf, gs_epsg$oficial)
@@ -165,6 +174,18 @@ gs_resultado_proximidade_vazio <- function(ponto, tipo_distancia, raio_m,
   attr(out, "raio_m") <- raio_m
   attr(out, "n_por_camada") <- n_por_camada
   attr(out, "amostra_truncada") <- FALSE
+  attr(out, "amostragem_por_camada") <- data.frame(
+    camada = character(0), n_disponivel = integer(0), n_retido = integer(0),
+    n_omitido = integer(0), stringsAsFactors = FALSE
+  )
+  attr(out, "backend_distancia") <- switch(
+    tipo_distancia,
+    geodesica = "s2::s2_distance (esfera)",
+    euclidiana = "sf::st_distance (EPSG:31983)",
+    haversine = "fórmula de Haversine (raio terrestre 6371000 m)",
+    manhattan = "norma L1 (EPSG:31983)",
+    rede_viaria = paste0("OSRM ", gs_osrm_profile(), " em ", gs_osrm_server())
+  )
   out
 }
 
@@ -242,7 +263,7 @@ gs_servicos_proximos <- function(cep = NULL, coordenadas = NULL, camadas = NULL,
       if (nrow(pts) == 0) return(NULL)
     }
     dists <- gs_calcular_distancias(ponto$sf, pts, tipo_distancia)
-    tab$distancia_m <- round(dists, 1)
+    tab$distancia_m <- dists
     tab$camada      <- cam
     tab$nome        <- if ("nm_equipamento" %in% names(tab)) tab$nm_equipamento else NA_character_
     tab$tipo_servico <- if ("nm_tipo_equipamento" %in% names(tab)) tab$nm_tipo_equipamento else NA_character_
@@ -264,6 +285,11 @@ gs_servicos_proximos <- function(cep = NULL, coordenadas = NULL, camadas = NULL,
 
   sel <- out[!is.na(out$distancia_m) & is.finite(out$distancia_m) &
                out$distancia_m <= raio_m, , drop = FALSE]
+  disponiveis <- table(as.character(sel$camada))
+  amostragem <- data.frame(
+    camada = names(disponiveis), n_disponivel = as.integer(disponiveis),
+    stringsAsFactors = FALSE
+  )
   amostra_truncada <- FALSE
   if (!is.null(n_por_camada) && nrow(sel) > 0) {
     amostra_truncada <- any(table(sel$camada) > n_por_camada)
@@ -287,11 +313,27 @@ gs_servicos_proximos <- function(cep = NULL, coordenadas = NULL, camadas = NULL,
     ))
   }
   rownames(sel) <- NULL
+  sel$distancia_m <- round(sel$distancia_m, 1)
 
   attr(sel, "ponto")          <- ponto
   attr(sel, "tipo_distancia") <- tipo_distancia
   attr(sel, "raio_m")         <- raio_m
   attr(sel, "n_por_camada")   <- n_por_camada
   attr(sel, "amostra_truncada") <- amostra_truncada
+  retidos <- table(as.character(sel$camada))
+  amostragem$n_retido <- as.integer(retidos[match(
+    amostragem$camada, names(retidos)
+  )])
+  amostragem$n_retido[is.na(amostragem$n_retido)] <- 0L
+  amostragem$n_omitido <- amostragem$n_disponivel - amostragem$n_retido
+  attr(sel, "amostragem_por_camada") <- amostragem
+  attr(sel, "backend_distancia") <- switch(
+    tipo_distancia,
+    geodesica = "s2::s2_distance (esfera)",
+    euclidiana = "sf::st_distance (EPSG:31983)",
+    haversine = "fórmula de Haversine (raio terrestre 6371000 m)",
+    manhattan = "norma L1 (EPSG:31983)",
+    rede_viaria = paste0("OSRM ", gs_osrm_profile(), " em ", gs_osrm_server())
+  )
   sel
 }

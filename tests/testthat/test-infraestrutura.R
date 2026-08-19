@@ -301,6 +301,47 @@ test_that("proximidade ignora corpo poligonal e retorna vazio consistente", {
   )
   expect_equal(attr(resultado, "raio_m"), 10)
   expect_identical(attr(resultado, "tipo_distancia"), "geodesica")
+  expect_false(attr(resultado, "amostra_truncada"))
+  expect_null(attr(resultado, "n_por_camada"))
+})
+
+test_that("proximidade registra se o limite realmente truncou a amostra", {
+  pasta <- tempfile("proximidade-limite-")
+  dir.create(pasta)
+  writeLines(c(
+    "nm_equipamento,latitude,longitude",
+    "A,-23.5500,-46.6300",
+    "B,-23.5505,-46.6300",
+    "C,-23.5510,-46.6300"
+  ), file.path(pasta, "pontos.csv"))
+
+  truncado <- gs_servicos_proximos(
+    coordenadas = c(-23.55, -46.63), raio_m = 1000,
+    n_por_camada = 2, dir = pasta
+  )
+  completo <- gs_servicos_proximos(
+    coordenadas = c(-23.55, -46.63), raio_m = 1000,
+    n_por_camada = 5, dir = pasta
+  )
+  expect_equal(nrow(truncado), 2)
+  expect_identical(attr(truncado, "n_por_camada"), 2L)
+  expect_true(attr(truncado, "amostra_truncada"))
+  expect_false(attr(completo, "amostra_truncada"))
+})
+
+test_that("filtro do raio usa distancia sem arredondamento", {
+  pasta <- tempfile("proximidade-arredondamento-")
+  dir.create(pasta)
+  writeLines(c(
+    "nm_equipamento,latitude,longitude",
+    "Fora,-23.5500,-46.6300"
+  ), file.path(pasta, "pontos.csv"))
+  local_mock_global(gs_calcular_distancias = function(...) 1000.04)
+
+  resultado <- gs_servicos_proximos(
+    coordenadas = c(-23.55, -46.63), raio_m = 1000, dir = pasta
+  )
+  expect_equal(nrow(resultado), 0)
 })
 
 test_that("funcoes de leitura nao criam data", {

@@ -251,6 +251,42 @@ gs_coletar_artefatos <- function(analises, dir, id_origem = "origem",
   manifesto
 }
 
+gs_metadados_consulta <- function(resultado, id_origem = "origem") {
+  ponto <- attr(resultado, "ponto")
+  valor_ponto <- function(nome) {
+    if (is.list(ponto) && !is.null(ponto[[nome]])) ponto[[nome]][1] else NA
+  }
+  limite <- attr(resultado, "n_por_camada")
+  data.frame(
+    id_origem = as.character(id_origem),
+    origem = as.character(valor_ponto("origem")),
+    latitude = suppressWarnings(as.numeric(valor_ponto("latitude"))),
+    longitude = suppressWarnings(as.numeric(valor_ponto("longitude"))),
+    raio_m = suppressWarnings(as.numeric(attr(resultado, "raio_m"))[1]),
+    tipo_distancia = as.character(attr(resultado, "tipo_distancia"))[1],
+    backend_distancia = as.character(attr(resultado, "backend_distancia"))[1],
+    n_por_camada = if (is.null(limite)) NA_integer_ else as.integer(limite)[1],
+    amostra_truncada = isTRUE(attr(resultado, "amostra_truncada")),
+    n_retido = nrow(resultado),
+    stringsAsFactors = FALSE
+  )
+}
+
+gs_amostragem_resultado <- function(resultado, id_origem = "origem") {
+  amostragem <- attr(resultado, "amostragem_por_camada")
+  if (!is.data.frame(amostragem)) {
+    camadas <- if ("camada" %in% names(resultado)) table(resultado$camada) else integer(0)
+    amostragem <- data.frame(
+      camada = names(camadas), n_disponivel = as.integer(camadas),
+      n_retido = as.integer(camadas), n_omitido = 0L,
+      stringsAsFactors = FALSE
+    )
+  }
+  amostragem$id_origem <- rep(as.character(id_origem), nrow(amostragem))
+  amostragem[, c("id_origem", "camada", "n_disponivel", "n_retido", "n_omitido"),
+             drop = FALSE]
+}
+
 gs_exportar_resultado <- function(resultado, analises = NULL, dir = "saidas",
                                    id_origem = "origem", salvar_figuras = TRUE,
                                    dpi = 200) {
@@ -264,6 +300,24 @@ gs_exportar_resultado <- function(resultado, analises = NULL, dir = "saidas",
     manifesto,
     gs_linha_manifesto(id_origem, "dados", "proximidade", "servicos_proximos",
                        "csv", arq_servicos)
+  )
+
+  metadados <- gs_metadados_consulta(resultado, id_origem)
+  arq_metadados <- file.path(dir, "metadados_consulta.csv")
+  gs_escrever_csv_atomico(metadados, arq_metadados)
+  manifesto <- rbind(
+    manifesto,
+    gs_linha_manifesto(id_origem, "dados", "proximidade",
+                       "metadados_consulta", "csv", arq_metadados)
+  )
+
+  amostragem <- gs_amostragem_resultado(resultado, id_origem)
+  arq_amostragem <- file.path(dir, "amostragem_por_camada.csv")
+  gs_escrever_csv_atomico(amostragem, arq_amostragem)
+  manifesto <- rbind(
+    manifesto,
+    gs_linha_manifesto(id_origem, "dados", "proximidade",
+                       "amostragem_por_camada", "csv", arq_amostragem)
   )
 
   if (!is.null(analises)) {
@@ -377,6 +431,8 @@ gs_relatorio_numerico <- function(resultado, analises, arquivo,
   ponto <- attr(resultado, "ponto")
   raio <- attr(resultado, "raio_m")
   origem <- if (is.list(ponto) && !is.null(ponto$origem)) ponto$origem else id_origem
+  metadados <- gs_metadados_consulta(resultado, id_origem)
+  amostragem <- gs_amostragem_resultado(resultado, id_origem)
   interpretacoes <- tryCatch(
     gs_interpretar_analise(analises, resultado, raio),
     error = function(e) list()
@@ -386,7 +442,10 @@ gs_relatorio_numerico <- function(resultado, analises, arquivo,
     "# Relatório numérico - GeoSampa", "",
     paste0("- Origem: ", gs_md_escape(origem)),
     paste0("- Raio da consulta: ", ifelse(is.null(raio), "não informado", raio), " m"),
-    paste0("- Serviços encontrados: ", nrow(resultado)), "",
+    paste0("- Serviços encontrados: ", nrow(resultado)),
+    paste0("- Distância: ", gs_md_escape(metadados$tipo_distancia),
+           " (", gs_md_escape(metadados$backend_distancia), ")"),
+    paste0("- Amostra truncada: ", metadados$amostra_truncada), "",
     "## Interpretação"
   )
   if (length(interpretacoes) == 0) {
@@ -414,6 +473,11 @@ gs_relatorio_numerico <- function(resultado, analises, arquivo,
   if (length(falhas) > 0) {
     linhas <- c(linhas, "", "## Análises não executadas", "",
                 gs_tab_md(do.call(rbind, falhas)))
+  }
+
+  if (nrow(amostragem) > 0) {
+    linhas <- c(linhas, "", "## Amostragem por camada", "",
+                gs_tab_md(amostragem[, setdiff(names(amostragem), "id_origem")]))
   }
 
   linhas <- c(linhas, "", "## Métricas", "")
@@ -489,6 +553,8 @@ gs_relatorio_analises <- function(resultado = NULL, cep = NULL,
   ponto <- attr(resultado, "ponto")
   raio <- attr(resultado, "raio_m")
   origem <- if (is.list(ponto) && !is.null(ponto$origem)) ponto$origem else id_origem
+  metadados <- gs_metadados_consulta(resultado, id_origem)
+  amostragem <- gs_amostragem_resultado(resultado, id_origem)
   interpretacoes <- tryCatch(
     gs_interpretar_analise(analises, resultado, raio),
     error = function(e) list()
@@ -504,7 +570,10 @@ gs_relatorio_analises <- function(resultado = NULL, cep = NULL,
       "# Relatório de análises - GeoSampa", "",
       paste0("**Origem:** ", gs_md_escape(origem), "  "),
       paste0("**Raio:** ", raio, " m  "),
-      paste0("**Serviços encontrados:** ", nrow(resultado)), "",
+      paste0("**Serviços encontrados:** ", nrow(resultado), "  "),
+      paste0("**Distância:** ", gs_md_escape(metadados$tipo_distancia),
+             " (", gs_md_escape(metadados$backend_distancia), ")  "),
+      paste0("**Amostra truncada:** ", metadados$amostra_truncada), "",
       "## Síntese"
     )
     if (length(interpretacoes) == 0) {
@@ -520,6 +589,10 @@ gs_relatorio_analises <- function(resultado = NULL, cep = NULL,
       tab$valor <- gs_valor_metrica_texto(metricas)
       linhas <- c(linhas, "", "## Métricas", "",
                   gs_tab_md(tab[, c("analise", "metrica", "valor", "unidade")]))
+    }
+    if (nrow(amostragem) > 0) {
+      linhas <- c(linhas, "", "## Amostragem por camada", "",
+                  gs_tab_md(amostragem[, setdiff(names(amostragem), "id_origem")]))
     }
     if (nrow(artefatos) > 0) {
       linhas <- c(linhas, "", "## Artefatos", "")
@@ -542,8 +615,12 @@ gs_relatorio_analises <- function(resultado = NULL, cep = NULL,
     tags <- htmltools::tags
     secoes <- list(
       tags$h1("Relatório de análises - GeoSampa"),
-      tags$p(sprintf("Origem: %s | Raio: %s m | Serviços: %d",
-                     origem, raio, nrow(resultado))),
+      tags$p(sprintf(
+        paste0("Origem: %s | Raio: %s m | Serviços: %d | Distância: %s ",
+               "(%s) | Amostra truncada: %s"),
+        origem, raio, nrow(resultado), metadados$tipo_distancia,
+        metadados$backend_distancia, metadados$amostra_truncada
+      )),
       tags$h2("Síntese")
     )
     if (length(interpretacoes) == 0) {
@@ -561,6 +638,12 @@ gs_relatorio_analises <- function(resultado = NULL, cep = NULL,
       secoes[[length(secoes) + 1L]] <- tags$h2("Métricas")
       secoes[[length(secoes) + 1L]] <- gs_tab_html(
         tab[, c("analise", "metrica", "valor", "unidade")]
+      )
+    }
+    if (nrow(amostragem) > 0) {
+      secoes[[length(secoes) + 1L]] <- tags$h2("Amostragem por camada")
+      secoes[[length(secoes) + 1L]] <- gs_tab_html(
+        amostragem[, setdiff(names(amostragem), "id_origem")]
       )
     }
     if (nrow(artefatos) > 0) {
