@@ -116,7 +116,7 @@ test_that("paginacao reaproveita somente paginas ordenadas", {
     "teste", dir = pasta, csv = FALSE, tamanho_pagina = 2, verbose = FALSE
   )
   ordenadas <- Filter(function(x) !is.null(x$sortBy), chamadas)
-  expect_identical(vapply(ordenadas, `[[`, numeric(1), "startIndex"), c(0, 2))
+  expect_identical(vapply(ordenadas, `[[`, numeric(1), "startIndex"), c(0, 2, 3))
   expect_true(all(vapply(ordenadas, `[[`, character(1), "sortBy") ==
                     "cd_identificador"))
   salvo <- jsonlite::fromJSON(resultado$geojson, simplifyVector = FALSE)

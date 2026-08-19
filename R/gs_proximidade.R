@@ -147,7 +147,8 @@ gs_resolver_camadas <- function(camadas, dir = gs_caminho_dados()) {
   list(resolvidas = unique(resolvidas), nao_encontradas = unique(nao_encontradas))
 }
 
-gs_resultado_proximidade_vazio <- function(ponto, tipo_distancia, raio_m) {
+gs_resultado_proximidade_vazio <- function(ponto, tipo_distancia, raio_m,
+                                           n_por_camada = NULL) {
   out <- data.frame(
     camada = character(0),
     nome = character(0),
@@ -162,6 +163,8 @@ gs_resultado_proximidade_vazio <- function(ponto, tipo_distancia, raio_m) {
   attr(out, "ponto") <- ponto
   attr(out, "tipo_distancia") <- tipo_distancia
   attr(out, "raio_m") <- raio_m
+  attr(out, "n_por_camada") <- n_por_camada
+  attr(out, "amostra_truncada") <- FALSE
   out
 }
 
@@ -254,12 +257,16 @@ gs_servicos_proximos <- function(cep = NULL, coordenadas = NULL, camadas = NULL,
 
   out <- do.call(rbind, Filter(Negate(is.null), res))
   if (is.null(out) || nrow(out) == 0) {
-    return(gs_resultado_proximidade_vazio(ponto, tipo_distancia, raio_m))
+    return(gs_resultado_proximidade_vazio(
+      ponto, tipo_distancia, raio_m, n_por_camada
+    ))
   }
 
   sel <- out[!is.na(out$distancia_m) & is.finite(out$distancia_m) &
                out$distancia_m <= raio_m, , drop = FALSE]
+  amostra_truncada <- FALSE
   if (!is.null(n_por_camada) && nrow(sel) > 0) {
+    amostra_truncada <- any(table(sel$camada) > n_por_camada)
     sel <- do.call(rbind, lapply(split(sel, sel$camada), function(d) {
       if (nrow(d) > n_por_camada) d[seq_len(n_por_camada), , drop = FALSE] else d
     }))
@@ -275,12 +282,16 @@ gs_servicos_proximos <- function(cep = NULL, coordenadas = NULL, camadas = NULL,
             "distancia_m", "latitude", "longitude")
   sel <- sel[, intersect(cols, names(sel)), drop = FALSE]
   if (nrow(sel) == 0) {
-    return(gs_resultado_proximidade_vazio(ponto, tipo_distancia, raio_m))
+    return(gs_resultado_proximidade_vazio(
+      ponto, tipo_distancia, raio_m, n_por_camada
+    ))
   }
   rownames(sel) <- NULL
 
   attr(sel, "ponto")          <- ponto
   attr(sel, "tipo_distancia") <- tipo_distancia
   attr(sel, "raio_m")         <- raio_m
+  attr(sel, "n_por_camada")   <- n_por_camada
+  attr(sel, "amostra_truncada") <- amostra_truncada
   sel
 }

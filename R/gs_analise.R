@@ -15,6 +15,27 @@ gs_dominio_consulta <- function(resultado, ponto = NULL, raio_m = NULL) {
   if (is.null(ponto)) ponto <- attr(resultado, "ponto")
   if (is.null(raio_m)) raio_m <- attr(resultado, "raio_m")
 
+  if (isTRUE(attr(resultado, "amostra_truncada"))) {
+    return(list(
+      executado = FALSE,
+      mensagem = paste0(
+        "A análise requer todas as ocorrências no domínio, mas o resultado foi ",
+        "truncado por `n_por_camada`. Refaça a busca sem esse limite."
+      )
+    ))
+  }
+  tipo_distancia <- attr(resultado, "tipo_distancia")
+  if (length(tipo_distancia) > 0 && !is.na(tipo_distancia[1]) &&
+      identical(as.character(tipo_distancia[1]), "rede_viaria")) {
+    return(list(
+      executado = FALSE,
+      mensagem = paste0(
+        "A distância por rede viária não define uma janela observacional ",
+        "sem uma isócrona. Use uma distância em linha reta nesta análise."
+      )
+    ))
+  }
+
   raio_m <- suppressWarnings(as.numeric(raio_m)[1])
   if (length(raio_m) == 0 || !is.finite(raio_m) || raio_m <= 0) {
     return(list(executado = FALSE,
@@ -53,15 +74,28 @@ gs_dominio_consulta <- function(resultado, ponto = NULL, raio_m = NULL) {
     return(list(executado = FALSE,
                 mensagem = "Não foi possível projetar o ponto da consulta."))
   }
-  dominio <- tryCatch(sf::st_buffer(ponto_utm, raio_m),
-                      error = function(e) NULL)
+  tipo_distancia <- if (length(tipo_distancia) == 0 || is.na(tipo_distancia[1])) {
+    "geodesica"
+  } else {
+    as.character(tipo_distancia[1])
+  }
+  dominio <- if (identical(tipo_distancia, "manhattan")) {
+    centro <- sf::st_coordinates(ponto_utm)[1, ]
+    sf::st_sfc(sf::st_polygon(list(rbind(
+      centro + c(0, raio_m), centro + c(raio_m, 0),
+      centro + c(0, -raio_m), centro + c(-raio_m, 0),
+      centro + c(0, raio_m)
+    ))), crs = sf::st_crs(ponto_utm))
+  } else {
+    tryCatch(sf::st_buffer(ponto_utm, raio_m), error = function(e) NULL)
+  }
   if (is.null(dominio) || any(sf::st_is_empty(dominio))) {
     return(list(executado = FALSE,
                 mensagem = "Não foi possível construir o buffer da consulta."))
   }
 
   list(executado = TRUE, ponto = ponto_utm, dominio = dominio,
-       raio_m = raio_m)
+       raio_m = raio_m, tipo_distancia = tipo_distancia)
 }
 
 gs_com_seed <- function(seed, expr) {
@@ -427,9 +461,9 @@ gs_analise_raios <- function(resultado, ponto, raios = c(500, 1000, 2000)) {
 }
 
 # --- Autocorrelação espacial (Moran's I) — requer spdep ------------------------
-# A versão padrão (sobre_grade = TRUE) aplica Moran's I às CONTAGENS de
-# serviços por célula hexagonal (via gs_grade_hex), a aplicação estatisticamente
-# correta para pontos. A versão alternativa (sobre_grade = FALSE) aplica às
+# A versão padrão (sobre_grade = TRUE) aplica Moran's I à DENSIDADE de
+# serviços por célula hexagonal (via gs_grade_hex), controlando a menor exposição
+# das células recortadas na borda. A versão alternativa (sobre_grade = FALSE) aplica às
 # distâncias radiais e é mantida apenas como DIAGNÓSTICO, com ressalva: essa
 # variável tem gradiente espacial construído (distância a um único ponto), o que
 # tende a indicar agrupamento por construção.
@@ -459,11 +493,11 @@ gs_analise_moran <- function(resultado, celula_m = gs_celula_hex_m,
       return(list(executado = FALSE,
                   mensagem = "Menos de 4 células no domínio para Moran's I."))
     }
-    x <- as.numeric(grade$n_servicos)
+    x <- as.numeric(grade$densidade_por_km2)
     variancia <- stats::var(x)
     if (!is.finite(variancia) || variancia <= 0) {
       return(list(executado = FALSE,
-                  mensagem = "Contagens sem variância — Moran's I não é definido."))
+                  mensagem = "Densidades sem variância — Moran's I não é definido."))
     }
     nb <- tryCatch(spdep::poly2nb(sf::st_geometry(grade), queen = TRUE),
                    error = function(e) NULL)
@@ -492,17 +526,18 @@ gs_analise_moran <- function(resultado, celula_m = gs_celula_hex_m,
     moran_i <- unname(teste$statistic)
     valor_p <- teste$p.value
     interpretacao <- if (valor_p < 0.05 && moran_i > 0) {
-      "Há autocorrelação espacial positiva: células vizinhas tendem a ter contagens de serviços semelhantes (agrupamento)."
+      "Há autocorrelação espacial positiva: células vizinhas tendem a ter densidades de serviços semelhantes (agrupamento)."
     } else if (valor_p < 0.05 && moran_i < 0) {
-      "Há autocorrelação espacial negativa: células vizinhas tendem a ter contagens de serviços distintas (dispersão)."
+      "Há autocorrelação espacial negativa: células vizinhas tendem a ter densidades de serviços distintas (dispersão)."
     } else {
-      "Não há evidência de autocorrelação espacial significativa na contagem de serviços por célula."
+      "Não há evidência de autocorrelação espacial significativa na densidade de serviços por célula."
     }
     return(list(
       executado = TRUE, metodo = "grade_hex", celula_m = celula_m,
       moran_i = round(moran_i, 4), valor_p = round(valor_p, 4),
       n_celulas = nrow(grade),
-      n_celulas_ocupadas = sum(x > 0),
+      n_celulas_ocupadas = sum(grade$n_servicos > 0),
+      variavel = "densidade_por_km2",
       metodo_p = "Monte Carlo bilateral", nsim = nsim, seed = seed,
       interpretacao = interpretacao,
       objeto = teste
@@ -996,6 +1031,9 @@ gs_grade_hex <- function(resultado, celula_m = gs_celula_hex_m,
                 mensagem = "Não foi possível construir a grade hexagonal."))
   }
   grade_sf <- sf::st_sf(celula_id = seq_along(grade), geometry = grade)
+  area_celula_m2 <- stats::setNames(
+    as.numeric(sf::st_area(grade_sf)), as.character(grade_sf$celula_id)
+  )
   toca <- lengths(sf::st_intersects(grade_sf, dominio$dominio)) > 0
   grade_sf <- grade_sf[toca, , drop = FALSE]
   grade_sf <- tryCatch(
@@ -1016,7 +1054,14 @@ gs_grade_hex <- function(resultado, celula_m = gs_celula_hex_m,
     return(list(executado = FALSE,
                 mensagem = "O domínio não contém células hexagonais válidas."))
   }
+  grade_sf$area_observada_km2 <- as.numeric(sf::st_area(grade_sf)) / 1e6
+  grade_sf$fracao_area_observada <- pmin(
+    as.numeric(sf::st_area(grade_sf)) /
+      area_celula_m2[as.character(grade_sf$celula_id)],
+    1
+  )
   grade_sf$n_servicos <- integer(nrow(grade_sf))
+  grade_sf$densidade_por_km2 <- numeric(nrow(grade_sf))
   grade_sf$camadas <- rep(NA_character_, nrow(grade_sf))
 
   if (!is.data.frame(resultado) || nrow(resultado) == 0) {
@@ -1053,6 +1098,8 @@ gs_grade_hex <- function(resultado, celula_m = gs_celula_hex_m,
   }, integer(1))
   dentro <- !is.na(atribuicao)
   grade_sf$n_servicos <- tabulate(atribuicao[dentro], nbins = nrow(grade_sf))
+  grade_sf$densidade_por_km2 <-
+    grade_sf$n_servicos / pmax(grade_sf$area_observada_km2, 1e-9)
   camadas <- if ("camada" %in% names(pts_utm)) {
     as.character(pts_utm$camada)
   } else {
@@ -1070,11 +1117,11 @@ gs_grade_hex <- function(resultado, celula_m = gs_celula_hex_m,
 # --- Mapa simples de contagens por célula --------------------------------------
 gs_mapa_grade <- function(grade, titulo) {
   ggplot2::ggplot(grade) +
-    ggplot2::geom_sf(ggplot2::aes(fill = n_servicos), color = "white",
+    ggplot2::geom_sf(ggplot2::aes(fill = densidade_por_km2), color = "white",
                      linewidth = 0.1) +
     ggplot2::scale_fill_viridis_c(na.value = "grey90") +
     gs_tema_mapa() +
-    ggplot2::labs(title = titulo, fill = "Nº de serviços")
+    ggplot2::labs(title = titulo, fill = "Serviços/km²")
 }
 
 # --- Mapa de classes (pontos quentes/frios ou LISA) ----------------------------
@@ -1116,11 +1163,11 @@ gs_analise_getis_ord <- function(resultado, celula_m = gs_celula_hex_m,
     return(list(executado = FALSE,
                 mensagem = "Menos de 4 células no domínio para Getis-Ord."))
   }
-  x <- as.numeric(grade$n_servicos)
+  x <- as.numeric(grade$densidade_por_km2)
   variancia <- stats::var(x)
   if (!is.finite(variancia) || variancia <= 0) {
     return(list(executado = FALSE,
-                mensagem = "Contagens sem variância — Getis-Ord G* não é definido."))
+                mensagem = "Densidades sem variância — Getis-Ord G* não é definido."))
   }
   nb <- tryCatch(spdep::poly2nb(sf::st_geometry(grade), queen = TRUE),
                  error = function(e) NULL)
@@ -1162,7 +1209,8 @@ gs_analise_getis_ord <- function(resultado, celula_m = gs_celula_hex_m,
                    ifelse(grade$p_ajustado < 0.05 & grade$gi_z < 0,
                           "ponto frio", "não significativo"))
   list(executado = TRUE, celula_m = celula_m,
-       grade = grade, inclui_self = TRUE, correcao_p = "BH",
+       grade = grade, variavel = "densidade_por_km2",
+       inclui_self = TRUE, correcao_p = "BH",
        avisos = "P-valores bilaterais ajustados por Benjamini-Hochberg; a análise permanece exploratória.",
        mapa = gs_mapa_grade_classe(grade, "Getis-Ord (G*) por célula"))
 }
@@ -1180,11 +1228,11 @@ gs_analise_lisa <- function(resultado, celula_m = gs_celula_hex_m,
     return(list(executado = FALSE,
                 mensagem = "Menos de 4 células no domínio para LISA."))
   }
-  x <- as.numeric(grade$n_servicos)
+  x <- as.numeric(grade$densidade_por_km2)
   variancia <- stats::var(x)
   if (!is.finite(variancia) || variancia <= 0) {
     return(list(executado = FALSE,
-                mensagem = "Contagens sem variância — LISA não é definido."))
+                mensagem = "Densidades sem variância — LISA não é definido."))
   }
   nb <- tryCatch(spdep::poly2nb(sf::st_geometry(grade), queen = TRUE),
                  error = function(e) NULL)
@@ -1230,7 +1278,7 @@ gs_analise_lisa <- function(resultado, celula_m = gs_celula_hex_m,
     grade$valor_centrado, grade$lag_espacial, grade$p_ajustado
   )
   list(executado = TRUE, celula_m = celula_m,
-       grade = grade, correcao_p = "BH",
+       grade = grade, variavel = "densidade_por_km2", correcao_p = "BH",
        avisos = "P-valores bilaterais ajustados por Benjamini-Hochberg; a análise permanece exploratória.",
        mapa = gs_mapa_grade_classe(grade, "LISA por célula"))
 }
