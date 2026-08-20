@@ -31,6 +31,10 @@ test_that("coletor salva plots, tabelas, metricas e sf como GeoJSON", {
   expect_true(file.exists(file.path(saida, "metricas.csv")))
   expect_true(file.exists(file.path(saida, "metadados_consulta.csv")))
   expect_true(file.exists(file.path(saida, "amostragem_por_camada.csv")))
+  servicos_exportados <- readr::read_csv(
+    file.path(saida, "servicos_proximos.csv"), show_col_types = FALSE
+  )
+  expect_true("distancia_m_exata" %in% names(servicos_exportados))
   expect_true(any(manifesto$categoria == "figura" & manifesto$status == "ok"))
   expect_true(any(manifesto$categoria == "geometria" &
                     manifesto$formato == "geojson" & manifesto$status == "ok"))
@@ -79,6 +83,33 @@ test_that("salvamento consolidado mantém PNG e gera relatórios numéricos", {
   expect_match(html, "Relatório", fixed = TRUE)
 })
 
+test_that("relatorios ricos exibem analises bloqueadas e limitacoes", {
+  pasta <- withr::local_tempdir()
+  cria_base_lote(pasta)
+  resultado <- gs_servicos_proximos(
+    coordenadas = c(-23.551, -46.630), raio_m = 2500,
+    n_por_camada = 1, dir = pasta
+  )
+  analises <- gs_analise_servicos(
+    resultado, tipo = c("descritivas", "acessibilidade_media", "nni"),
+    dir = pasta
+  )
+  md <- file.path(pasta, "relatorio.md")
+  html <- file.path(pasta, "relatorio.html")
+  manifesto <- gs_manifesto_vazio()
+  gs_relatorio_analises(resultado = resultado, analises = analises,
+                        arquivo = md, formato = "md", manifesto = manifesto)
+  gs_relatorio_analises(resultado = resultado, analises = analises,
+                        arquivo = html, formato = "html", manifesto = manifesto)
+
+  texto_md <- paste(readLines(md, warn = FALSE), collapse = "\n")
+  texto_html <- paste(readLines(html, warn = FALSE), collapse = "\n")
+  expect_match(texto_md, "Análises não executadas", fixed = TRUE)
+  expect_match(texto_md, "Limitações", fixed = TRUE)
+  expect_match(texto_html, "Análises não executadas", fixed = TRUE)
+  expect_match(texto_html, "Limitações", fixed = TRUE)
+})
+
 test_that("execução em lote aceita várias coordenadas e consolida resultados", {
   pasta <- withr::local_tempdir()
   dados <- file.path(pasta, "dados")
@@ -106,8 +137,31 @@ test_that("execução em lote aceita várias coordenadas e consolida resultados"
   expect_true(file.exists(file.path(lote$pasta, "origens.csv")))
   expect_true(file.exists(file.path(lote$pasta, "comparacao_origens.csv")))
   expect_true(file.exists(file.path(lote$pasta, "relatorio_lote.md")))
+  expect_true(file.exists(file.path(lote$pasta, "resultado_lote.rds")))
   expect_true(file.exists(file.path(lote$pasta, "figuras",
                                     "comparacao_contagens.png")))
+})
+
+test_that("lote marca origem parcial quando uma análise é bloqueada", {
+  pasta <- withr::local_tempdir()
+  dados <- file.path(pasta, "dados")
+  dir.create(dados)
+  cria_base_lote(dados)
+
+  lote <- gs_analisar_locais(
+    coordenadas = c(-23.551, -46.630), camadas = "saude",
+    raio_m = 2500, n_por_camada = 1,
+    tipo = c("descritivas", "acessibilidade_media", "kde"),
+    dir = dados, dir_saida = pasta, nome_execucao = "parcial",
+    formato_relatorio = "nenhum", salvar_mapa = FALSE
+  )
+  expect_identical(lote$origens$status, "parcial")
+  expect_match(lote$origens$mensagem, "acessibilidade_media")
+  expect_match(lote$origens$mensagem, "kde")
+  relatorio <- paste(readLines(lote$relatorio, warn = FALSE), collapse = "\n")
+  expect_match(relatorio, "parcial", fixed = TRUE)
+  expect_false(any(lote$manifesto$item == "resultado_lote"))
+  expect_true(file.exists(file.path(lote$pasta, "resultado_lote.rds")))
 })
 
 test_that("normalização do lote combina CEPs e coordenadas com IDs seguros", {

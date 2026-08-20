@@ -47,6 +47,17 @@ gs_distancias_s2 <- function(ponto_sf, pontos_sf) {
   as.numeric(s2::s2_distance_matrix(origem, destinos)[1, ])
 }
 
+gs_backend_distancia <- function(tipo_distancia) {
+  switch(
+    tipo_distancia,
+    geodesica = "s2::s2_distance (esfera)",
+    euclidiana = "sf::st_distance (EPSG:31983)",
+    haversine = "fórmula de Haversine (raio terrestre 6371000 m)",
+    manhattan = "norma L1 (EPSG:31983)",
+    rede_viaria = paste0("OSRM ", gs_osrm_profile(), " em ", gs_osrm_server())
+  )
+}
+
 gs_calcular_distancias <- function(ponto_sf, pontos_sf,
                                    tipo_distancia = c("geodesica", "euclidiana",
                                                       "haversine", "manhattan",
@@ -157,7 +168,8 @@ gs_resolver_camadas <- function(camadas, dir = gs_caminho_dados()) {
 }
 
 gs_resultado_proximidade_vazio <- function(ponto, tipo_distancia, raio_m,
-                                           n_por_camada = NULL) {
+                                           n_por_camada = NULL,
+                                           camadas_consultadas = character(0)) {
   out <- data.frame(
     camada = character(0),
     nome = character(0),
@@ -165,6 +177,7 @@ gs_resultado_proximidade_vazio <- function(ponto, tipo_distancia, raio_m,
     endereco = character(0),
     bairro = character(0),
     distancia_m = numeric(0),
+    distancia_m_exata = numeric(0),
     latitude = numeric(0),
     longitude = numeric(0),
     stringsAsFactors = FALSE
@@ -175,17 +188,12 @@ gs_resultado_proximidade_vazio <- function(ponto, tipo_distancia, raio_m,
   attr(out, "n_por_camada") <- n_por_camada
   attr(out, "amostra_truncada") <- FALSE
   attr(out, "amostragem_por_camada") <- data.frame(
-    camada = character(0), n_disponivel = integer(0), n_retido = integer(0),
-    n_omitido = integer(0), stringsAsFactors = FALSE
+    camada = as.character(camadas_consultadas),
+    n_disponivel = integer(length(camadas_consultadas)),
+    n_retido = integer(length(camadas_consultadas)),
+    n_omitido = integer(length(camadas_consultadas)), stringsAsFactors = FALSE
   )
-  attr(out, "backend_distancia") <- switch(
-    tipo_distancia,
-    geodesica = "s2::s2_distance (esfera)",
-    euclidiana = "sf::st_distance (EPSG:31983)",
-    haversine = "fórmula de Haversine (raio terrestre 6371000 m)",
-    manhattan = "norma L1 (EPSG:31983)",
-    rede_viaria = paste0("OSRM ", gs_osrm_profile(), " em ", gs_osrm_server())
-  )
+  attr(out, "backend_distancia") <- gs_backend_distancia(tipo_distancia)
   out
 }
 
@@ -200,13 +208,15 @@ gs_resultado_proximidade_vazio <- function(ponto, tipo_distancia, raio_m,
 #   tipo_distancia métrica de distância (ver gs_tipos_distancia()).
 # Devolve data.frame ordenado (mais próximo primeiro), com os atributos
 # `ponto`, `tipo_distancia` e `raio_m` usados pelos mapas e análises.
-gs_servicos_proximos <- function(cep = NULL, coordenadas = NULL, camadas = NULL,
-                                 raio_m = gs_raio_padrao_m,
-                                 n_por_camada = NULL,
-                                  tipo_distancia = c("geodesica", "euclidiana",
-                                                     "haversine", "manhattan",
-                                                     "rede_viaria"),
-                                  dir = gs_caminho_dados()) {
+gs_servicos_proximos_impl <- function(cep = NULL, coordenadas = NULL,
+                                      camadas = NULL,
+                                      raio_m = gs_raio_padrao_m,
+                                      n_por_camada = NULL,
+                                      tipo_distancia = c(
+                                        "geodesica", "euclidiana", "haversine",
+                                        "manhattan", "rede_viaria"
+                                      ),
+                                      dir = gs_caminho_dados()) {
   tipo_distancia <- match.arg(tipo_distancia)
   raio_m <- gs_validar_numero_escalar(
     raio_m, "raio_m", minimo = 0, minimo_inclusivo = FALSE
@@ -256,7 +266,7 @@ gs_servicos_proximos <- function(cep = NULL, coordenadas = NULL, camadas = NULL,
       # Pré-filtro por linha reta: a distância por rede é sempre >= a geodésica,
       # então pontos além de `raio_m` em linha reta nunca entrariam no raio.
       # Evita requests gigantes ao servidor OSRM.
-      geo <- as.numeric(sf::st_distance(ponto$sf, pts))
+      geo <- gs_distancias_s2(ponto$sf, pts)
       manter <- geo <= raio_m
       pts <- pts[manter, , drop = FALSE]
       tab <- tab[manter, , drop = FALSE]
@@ -279,13 +289,13 @@ gs_servicos_proximos <- function(cep = NULL, coordenadas = NULL, camadas = NULL,
   out <- do.call(rbind, Filter(Negate(is.null), res))
   if (is.null(out) || nrow(out) == 0) {
     return(gs_resultado_proximidade_vazio(
-      ponto, tipo_distancia, raio_m, n_por_camada
+      ponto, tipo_distancia, raio_m, n_por_camada, camadas
     ))
   }
 
   sel <- out[!is.na(out$distancia_m) & is.finite(out$distancia_m) &
                out$distancia_m <= raio_m, , drop = FALSE]
-  disponiveis <- table(as.character(sel$camada))
+  disponiveis <- table(factor(as.character(sel$camada), levels = camadas))
   amostragem <- data.frame(
     camada = names(disponiveis), n_disponivel = as.integer(disponiveis),
     stringsAsFactors = FALSE
@@ -309,11 +319,15 @@ gs_servicos_proximos <- function(cep = NULL, coordenadas = NULL, camadas = NULL,
   sel <- sel[, intersect(cols, names(sel)), drop = FALSE]
   if (nrow(sel) == 0) {
     return(gs_resultado_proximidade_vazio(
-      ponto, tipo_distancia, raio_m, n_por_camada
+      ponto, tipo_distancia, raio_m, n_por_camada, camadas
     ))
   }
   rownames(sel) <- NULL
+  sel$distancia_m_exata <- sel$distancia_m
   sel$distancia_m <- round(sel$distancia_m, 1)
+  sel <- sel[, c("camada", "nome", "tipo_servico", "endereco", "bairro",
+                 "distancia_m", "distancia_m_exata", "latitude", "longitude"),
+             drop = FALSE]
 
   attr(sel, "ponto")          <- ponto
   attr(sel, "tipo_distancia") <- tipo_distancia
@@ -327,13 +341,22 @@ gs_servicos_proximos <- function(cep = NULL, coordenadas = NULL, camadas = NULL,
   amostragem$n_retido[is.na(amostragem$n_retido)] <- 0L
   amostragem$n_omitido <- amostragem$n_disponivel - amostragem$n_retido
   attr(sel, "amostragem_por_camada") <- amostragem
-  attr(sel, "backend_distancia") <- switch(
-    tipo_distancia,
-    geodesica = "s2::s2_distance (esfera)",
-    euclidiana = "sf::st_distance (EPSG:31983)",
-    haversine = "fórmula de Haversine (raio terrestre 6371000 m)",
-    manhattan = "norma L1 (EPSG:31983)",
-    rede_viaria = paste0("OSRM ", gs_osrm_profile(), " em ", gs_osrm_server())
-  )
+  attr(sel, "backend_distancia") <- gs_backend_distancia(tipo_distancia)
   sel
+}
+
+gs_servicos_proximos <- function(cep = NULL, coordenadas = NULL, camadas = NULL,
+                                 raio_m = gs_raio_padrao_m,
+                                 n_por_camada = NULL,
+                                 tipo_distancia = c("geodesica", "euclidiana",
+                                                    "haversine", "manhattan",
+                                                    "rede_viaria"),
+                                 dir = gs_caminho_dados()) {
+  executar <- function() gs_servicos_proximos_impl(
+    cep = cep, coordenadas = coordenadas, camadas = camadas,
+    raio_m = raio_m, n_por_camada = n_por_camada,
+    tipo_distancia = tipo_distancia, dir = dir
+  )
+  if (!dir.exists(dir)) return(executar())
+  gs_com_lock(gs_lock_diretorio(dir), executar())
 }

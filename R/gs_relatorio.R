@@ -13,6 +13,10 @@ gs_manifesto_vazio <- function() {
 
 gs_linha_manifesto <- function(id_origem, categoria, analise, item, formato,
                                 caminho, status = "ok", mensagem = NA_character_) {
+  caminho <- path.expand(as.character(caminho))
+  if (!grepl("^(/|[A-Za-z]:[/\\\\])", caminho)) {
+    caminho <- file.path(getwd(), caminho)
+  }
   data.frame(
     id_origem = as.character(id_origem), categoria = categoria,
     analise = analise, item = item, formato = formato,
@@ -422,6 +426,33 @@ gs_valor_metrica_texto <- function(metricas) {
   )
 }
 
+gs_falhas_analises <- function(analises) {
+  falhas <- lapply(names(analises), function(nm) {
+    x <- analises[[nm]]
+    if (!is.list(x) || !identical(x$executado, FALSE)) return(NULL)
+    mensagem <- if (is.null(x$mensagem) || length(x$mensagem) == 0) {
+      "não executada"
+    } else {
+      as.character(x$mensagem[1])
+    }
+    data.frame(analise = nm, mensagem = mensagem, stringsAsFactors = FALSE)
+  })
+  falhas <- Filter(Negate(is.null), falhas)
+  if (length(falhas) == 0) {
+    return(data.frame(analise = character(0), mensagem = character(0)))
+  }
+  do.call(rbind, falhas)
+}
+
+gs_texto_limitacoes <- function() {
+  paste0(
+    "As distâncias descrevem o conjunto observado dentro da janela da consulta. ",
+    "Intervalos e p-valores dependem das hipóteses de cada método e não ",
+    "transformam dados administrativos em amostra aleatória. LISA e Getis-Ord ",
+    "são exploratórios e usam ajuste Benjamini-Hochberg quando executados."
+  )
+}
+
 gs_relatorio_numerico <- function(resultado, analises, arquivo,
                                    id_origem = "origem",
                                    arquivo_metricas = file.path(
@@ -457,22 +488,10 @@ gs_relatorio_numerico <- function(resultado, analises, arquivo,
     }
   }
 
-  falhas <- lapply(names(analises), function(nm) {
-    x <- analises[[nm]]
-    if (is.list(x) && identical(x$executado, FALSE)) {
-      mensagem <- if (is.null(x$mensagem) || length(x$mensagem) == 0) {
-        "não executada"
-      } else {
-        as.character(x$mensagem[1])
-      }
-      data.frame(analise = nm, mensagem = mensagem,
-                 stringsAsFactors = FALSE)
-    } else NULL
-  })
-  falhas <- Filter(Negate(is.null), falhas)
-  if (length(falhas) > 0) {
+  falhas <- gs_falhas_analises(analises)
+  if (nrow(falhas) > 0) {
     linhas <- c(linhas, "", "## Análises não executadas", "",
-                gs_tab_md(do.call(rbind, falhas)))
+                gs_tab_md(falhas))
   }
 
   if (nrow(amostragem) > 0) {
@@ -491,12 +510,7 @@ gs_relatorio_numerico <- function(resultado, analises, arquivo,
   }
   linhas <- c(
     linhas, "", "## Limitações", "",
-    paste0(
-      "As distâncias descrevem o conjunto observado dentro do raio. Intervalos ",
-      "e p-valores dependem das hipóteses de cada método e não transformam os ",
-      "dados administrativos em amostra aleatória. LISA e Getis-Ord são ",
-      "exploratórios e usam ajuste Benjamini-Hochberg quando executados."
-    )
+    gs_texto_limitacoes()
   )
   gs_escrever_texto_atomico(linhas, arquivo)
   invisible(list(relatorio = arquivo, metricas = arquivo_metricas,
@@ -560,6 +574,7 @@ gs_relatorio_analises <- function(resultado = NULL, cep = NULL,
     error = function(e) list()
   )
   metricas <- gs_metricas_analises(analises, id_origem)
+  falhas <- gs_falhas_analises(analises)
   artefatos <- manifesto[manifesto$status == "ok" &
                            manifesto$categoria %in% c("figura", "tabela", "geometria"),
                          , drop = FALSE]
@@ -584,6 +599,10 @@ gs_relatorio_analises <- function(resultado = NULL, cep = NULL,
                     gs_md_escape(interpretacoes[[nm]]))
       }
     }
+    if (nrow(falhas) > 0) {
+      linhas <- c(linhas, "", "## Análises não executadas", "",
+                  gs_tab_md(falhas))
+    }
     if (nrow(metricas) > 0) {
       tab <- metricas[, c("analise", "metrica", "unidade"), drop = FALSE]
       tab$valor <- gs_valor_metrica_texto(metricas)
@@ -607,6 +626,7 @@ gs_relatorio_analises <- function(resultado = NULL, cep = NULL,
         }
       }
     }
+    linhas <- c(linhas, "", "## Limitações", "", gs_texto_limitacoes())
     gs_escrever_texto_atomico(linhas, arquivo)
   } else {
     if (!requireNamespace("htmltools", quietly = TRUE)) {
@@ -631,6 +651,10 @@ gs_relatorio_analises <- function(resultado = NULL, cep = NULL,
         secoes[[length(secoes) + 1L]] <- tags$p(class = "interpretacao",
                                                 interpretacoes[[nm]])
       }
+    }
+    if (nrow(falhas) > 0) {
+      secoes[[length(secoes) + 1L]] <- tags$h2("Análises não executadas")
+      secoes[[length(secoes) + 1L]] <- gs_tab_html(falhas)
     }
     if (nrow(metricas) > 0) {
       tab <- metricas[, c("analise", "metrica", "unidade"), drop = FALSE]
@@ -658,6 +682,8 @@ gs_relatorio_analises <- function(resultado = NULL, cep = NULL,
         }
       }
     }
+    secoes[[length(secoes) + 1L]] <- tags$h2("Limitações")
+    secoes[[length(secoes) + 1L]] <- tags$p(gs_texto_limitacoes())
     doc <- tags$html(
       tags$head(
         tags$meta(charset = "utf-8"), tags$title("Relatório GeoSampa"),

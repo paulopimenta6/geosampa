@@ -106,7 +106,7 @@ gs_normalizar_origens <- function(cep = NULL, coordenadas = NULL, ids = NULL) {
 }
 
 gs_resumo_origem <- function(resultado, id_origem) {
-  distancias <- suppressWarnings(as.numeric(resultado$distancia_m))
+  distancias <- gs_distancias_resultado(resultado)
   distancias <- distancias[is.finite(distancias)]
   if (length(distancias) == 0) {
     return(data.frame(
@@ -151,8 +151,13 @@ gs_plots_comparacao <- function(comparacao, servicos) {
   if (is.data.frame(servicos) && nrow(servicos) > 0) {
     servicos$id_origem <- factor(servicos$id_origem,
                                   levels = levels(comparacao$id_origem))
+    coluna_distancia <- if ("distancia_m_exata" %in% names(servicos)) {
+      "distancia_m_exata"
+    } else {
+      "distancia_m"
+    }
     plots$distancias <- ggplot2::ggplot(
-      servicos, ggplot2::aes(x = id_origem, y = distancia_m)
+      servicos, ggplot2::aes(x = id_origem, y = .data[[coluna_distancia]])
     ) +
       ggplot2::geom_boxplot(fill = "#41b6c4", outlier.alpha = 0.35) +
       ggplot2::stat_summary(fun = stats::median, geom = "point", shape = 18,
@@ -186,8 +191,8 @@ gs_relatorio_lote <- function(origens, comparacao, arquivo, figuras = character(
   linhas <- c(
     linhas, "## Interpretação", "",
     paste0(
-      "As comparações são descritivas: cada linha representa o conjunto completo ",
-      "de serviços encontrado para uma origem sob os mesmos filtros. Diferenças ",
+      "As comparações são descritivas: cada linha representa o conjunto de ",
+      "serviços registrado para uma origem sob os mesmos filtros. Diferenças ",
       "de contagem e distância não devem ser interpretadas como efeitos causais ",
       "nem como testes de hipótese entre bairros."
     )
@@ -270,6 +275,7 @@ gs_analisar_locais <- function(
         proximos, tipo = tipo, dir = dir, pop_layer = pop_layer,
         densidade_km2 = densidade_km2
       )
+      falhas_analises <- gs_falhas_analises(analises)
       servicos <- proximos
       servicos$id_origem <- rep(id, nrow(servicos))
       servicos$tipo_origem <- rep(origem$tipo_origem, nrow(servicos))
@@ -292,7 +298,19 @@ gs_analisar_locais <- function(
       comparacoes[[id]] <- comparacao_origem
       manifestos[[id]] <- arquivos$manifesto
       resultados[[id]] <- resultado_origem
-      origens$status[i] <- if (nrow(proximos) == 0) "sem_servicos" else "ok"
+      origens$status[i] <- if (nrow(proximos) == 0) {
+        "sem_servicos"
+      } else if (nrow(falhas_analises) > 0) {
+        "parcial"
+      } else {
+        "ok"
+      }
+      if (nrow(falhas_analises) > 0) {
+        origens$mensagem[i] <- paste0(
+          "Análises não executadas: ",
+          paste(falhas_analises$analise, collapse = ", ")
+        )
+      }
       NULL
     }, error = function(e) e)
 
@@ -361,7 +379,7 @@ gs_analisar_locais <- function(
     gs_linha_manifesto("lote", "relatorio", "comparacao", "relatorio_lote",
                        "md", relatorio_lote)
   )
-  gs_escrever_csv_atomico(manifesto, file.path(pasta, "manifesto.csv"))
+  arq_resultado <- file.path(pasta, "resultado_lote.rds")
 
   saida <- list(
     pasta = normalizePath(pasta, winslash = "/"), parametros = list(
@@ -373,6 +391,10 @@ gs_analisar_locais <- function(
     relatorio = relatorio_lote
   )
   class(saida) <- c("gs_lote", "list")
+  gs_gravar_atomico(arq_resultado, function(temporario) {
+    saveRDS(saida, temporario, version = 3)
+  })
+  gs_escrever_csv_atomico(manifesto, file.path(pasta, "manifesto.csv"))
   invisible(saida)
 }
 
@@ -380,6 +402,7 @@ print.gs_lote <- function(x, ...) {
   cat("Execução GeoSampa em lote\n")
   cat("Pasta:", x$pasta, "\n")
   cat("Origens:", nrow(x$origens), "| OK:", sum(x$origens$status == "ok"),
+      "| Parciais:", sum(x$origens$status == "parcial"),
       "| Sem serviços:", sum(x$origens$status == "sem_servicos"),
       "| Erros:", sum(x$origens$status == "erro"), "\n")
   invisible(x)

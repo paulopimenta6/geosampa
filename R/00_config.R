@@ -98,9 +98,9 @@ gs_osrm_input <- function(ids, lon, lat) {
 # Converte distâncias do osrmTable para metros: < 4.0 devolve km; >= 4.0 devolve m.
 gs_osrm_dist_m <- function(distancias) {
   if (utils::packageVersion("osrm") >= "4.0.0") {
-    round(as.numeric(distancias), 1)
+    as.numeric(distancias)
   } else {
-    round(as.numeric(distancias) * 1000, 1)
+    as.numeric(distancias) * 1000
   }
 }
 # Nomes das camadas administrativas (baixadas sob demanda do WFS do GeoSampa).
@@ -223,18 +223,100 @@ gs_hash_curto <- function(x) {
   sprintf("%08x", as.integer(hash))
 }
 
-# Promove um conjunto de arquivos como uma unidade e restaura os anteriores se
-# qualquer rename falhar. As origens devem estar no mesmo filesystem.
+# Um diretório de bloqueio por camada impede que leitores do projeto observem
+# o intervalo entre os renames de um par CSV/GeoJSON.
+gs_lock_transacao <- function(caminho) {
+  base <- tools::file_path_sans_ext(basename(caminho))
+  file.path(dirname(caminho), paste0(".", base, ".gs-lock"))
+}
+
+gs_lock_diretorio <- function(dir) {
+  file.path(dir, ".gs-diretorio.gs-lock")
+}
+
+gs_token_lock <- function() {
+  token <- getOption("gs.token_lock")
+  prefixo <- paste0(Sys.getpid(), "-")
+  if (is.null(token) || !startsWith(token, prefixo)) {
+    token <- paste(Sys.getpid(), format(Sys.time(), "%Y%m%d%H%M%OS6"),
+                   proc.time()[["elapsed"]], sep = "-")
+    options(gs.token_lock = token)
+  }
+  token
+}
+
+gs_adquirir_lock <- function(lock, timeout_s = getOption(
+                               "gs.transacao_timeout_s", 5
+                             )) {
+  inicio <- proc.time()[["elapsed"]]
+  repeat {
+    if (dir.create(lock, showWarnings = FALSE)) {
+      concluido <- FALSE
+      on.exit({
+        if (!concluido) unlink(lock, recursive = TRUE, force = TRUE)
+      }, add = TRUE)
+      writeLines(gs_token_lock(), file.path(lock, "owner"), useBytes = TRUE)
+      concluido <- TRUE
+      return(TRUE)
+    }
+    owner <- file.path(lock, "owner")
+    if (file.exists(owner) && identical(
+      tryCatch(readLines(owner, warn = FALSE, n = 1), error = function(e) ""),
+      gs_token_lock()
+    )) {
+      return(FALSE)
+    }
+    if (proc.time()[["elapsed"]] - inicio >= timeout_s) {
+      stop(
+        "A fonte está em atualização ou possui uma transação interrompida: ",
+        basename(lock), ". Conclua a aquisição antes da leitura."
+      )
+    }
+    Sys.sleep(0.05)
+  }
+}
+
+gs_com_lock <- function(lock, expr) {
+  adquirido <- gs_adquirir_lock(lock)
+  if (adquirido) {
+    on.exit(unlink(lock, recursive = TRUE, force = TRUE), add = TRUE)
+  }
+  force(expr)
+}
+
+gs_com_lock_arquivo <- function(caminho, expr) {
+  gs_com_lock(gs_lock_transacao(caminho), expr)
+}
+
+gs_listar_arquivos_consistente <- function(dir, ...) {
+  if (!dir.exists(dir)) return(character(0))
+  gs_com_lock(gs_lock_diretorio(dir), list.files(dir, ...))
+}
+
+# `NA` em `origens` representa remoção transacional do destino. Arquivos novos
+# devem estar no mesmo filesystem dos destinos para que `file.rename` seja
+# atômico por arquivo.
 gs_promover_conjunto_atomico <- function(origens, destinos) {
   if (length(origens) != length(destinos) || length(origens) == 0 ||
-      any(!file.exists(origens))) {
+      anyDuplicated(destinos)) {
     stop("Conjunto de arquivos inválido para promoção atômica.")
   }
-  dir.create(unique(dirname(destinos)), recursive = TRUE, showWarnings = FALSE)
+  remover <- is.na(origens) | !nzchar(origens)
+  if (any(!remover & !file.exists(origens))) {
+    stop("Conjunto de arquivos inválido para promoção atômica.")
+  }
+  for (pasta in unique(dirname(destinos))) {
+    dir.create(pasta, recursive = TRUE, showWarnings = FALSE)
+  }
+  locks <- c(
+    vapply(sort(unique(dirname(destinos))), gs_lock_diretorio, character(1)),
+    sort(unique(vapply(destinos, gs_lock_transacao, character(1))))
+  )
+  locks_criados <- character(0)
   backups <- paste0(
     destinos, ".backup-", Sys.getpid(), "-", seq_along(destinos)
   )
-  havia <- file.exists(destinos)
+  havia <- rep(FALSE, length(destinos))
   movidos <- rep(FALSE, length(destinos))
   concluido <- FALSE
   on.exit({
@@ -245,14 +327,25 @@ gs_promover_conjunto_atomico <- function(origens, destinos) {
       }
     }
     unlink(backups[file.exists(backups)], force = TRUE)
+    unlink(locks_criados, recursive = TRUE, force = TRUE)
   }, add = TRUE)
+  for (lock in locks) {
+    resultado_lock <- tryCatch({
+      gs_adquirir_lock(lock)
+    }, error = function(e) e)
+    if (inherits(resultado_lock, "condition")) {
+      stop(conditionMessage(resultado_lock))
+    }
+    if (isTRUE(resultado_lock)) locks_criados <- c(locks_criados, lock)
+  }
+  havia <- file.exists(destinos)
 
   for (i in which(havia)) {
     if (!file.rename(destinos[i], backups[i])) {
       stop("Não foi possível preparar a substituição de: ", destinos[i])
     }
   }
-  for (i in seq_along(origens)) {
+  for (i in which(!remover)) {
     if (!file.rename(origens[i], destinos[i])) {
       stop("Não foi possível promover o arquivo: ", destinos[i])
     }
@@ -274,16 +367,16 @@ gs_validar_csv_lido <- function(tab, arquivo) {
 }
 
 gs_ler_cabecalho_csv <- function(arquivo) {
-  tab <- suppressWarnings(readr::read_csv(
+  tab <- gs_com_lock_arquivo(arquivo, suppressWarnings(readr::read_csv(
     arquivo, n_max = 0, show_col_types = FALSE
-  ))
+  )))
   gs_validar_csv_lido(tab, arquivo)
 }
 
 gs_ler_csv_verificado <- function(arquivo, ...) {
-  tab <- suppressWarnings(readr::read_csv(
+  tab <- gs_com_lock_arquivo(arquivo, suppressWarnings(readr::read_csv(
     arquivo, ..., show_col_types = FALSE
-  ))
+  )))
   gs_validar_csv_lido(tab, arquivo)
 }
 

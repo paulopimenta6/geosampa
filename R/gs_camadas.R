@@ -93,7 +93,7 @@ gs_tema_camada <- function(camada) {
 # Mostra exatamente o que usar no argumento `camadas` de gs_servicos_proximos().
 # Só lista camadas de ponto (com latitude/longitude nos CSVs de data/).
 # `termo` filtra por tema ou nome (ex.: gs_listar_servicos("saude")).
-gs_listar_servicos <- function(termo = NULL, dir = gs_caminho_dados()) {
+gs_listar_servicos_impl <- function(termo = NULL, dir = gs_caminho_dados()) {
   camadas <- gs_camadas_local(dir)
   tem <- vapply(camadas, function(cam) {
     arq <- file.path(dir, paste0(cam, ".csv"))
@@ -134,4 +134,10 @@ gs_listar_servicos <- function(termo = NULL, dir = gs_caminho_dados()) {
   cat("💡 Também funciona passar só o tema (ex.: camadas = \"saude\") ",
       "ou um pedaço do nome (ex.: \"ubs\").\n", sep = "")
   invisible(tab)
+}
+
+gs_listar_servicos <- function(termo = NULL, dir = gs_caminho_dados()) {
+  executar <- function() gs_listar_servicos_impl(termo = termo, dir = dir)
+  if (!dir.exists(dir)) return(executar())
+  gs_com_lock(gs_lock_diretorio(dir), executar())
 }

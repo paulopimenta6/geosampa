@@ -119,6 +119,51 @@ test_that("dominio respeita metrica, truncamento e janela da rede", {
   attr(rede, "tipo_distancia") <- "rede_viaria"
   expect_false(gs_dominio_consulta(rede)$executado)
   expect_match(gs_dominio_consulta(rede)$mensagem, "isócrona")
+
+  expect_false(gs_dominio_consulta(resultado, raio_m = 2000)$executado)
+  outro_ponto <- list(longitude = -46.60, latitude = -23.50)
+  expect_false(gs_dominio_consulta(resultado, ponto = outro_ponto)$executado)
+})
+
+test_that("analises de oportunidade bloqueiam amostra truncada e raio nao observado", {
+  resultado <- cria_resultado_espacial(
+    rbind(c(100, 0), c(400, 0), c(800, 0)), raio_m = 1000
+  )
+  attr(resultado, "amostra_truncada") <- TRUE
+  descritivas <- gs_analise_descritivas(resultado)
+  expect_true(descritivas$executado)
+  expect_true(descritivas$amostra_truncada)
+  expect_false(gs_analise_acessibilidade(resultado)$executado)
+  expect_false(gs_analise_raio_otimo(resultado)$executado)
+  expect_false(gs_analise_kde(resultado, attr(resultado, "ponto"))$executado)
+  expect_false(gs_analise_kde_banda(
+    resultado, attr(resultado, "ponto")
+  )$executado)
+  expect_false(gs_analise_raios(
+    resultado, attr(resultado, "ponto"), raios = 500
+  )$executado)
+  texto <- gs_interpretar_analise(
+    list(descritivas = descritivas), resultado, raio_m = 1000
+  )$descritivas
+  expect_match(texto, "retidos")
+
+  attr(resultado, "amostra_truncada") <- FALSE
+  fora <- gs_analise_raios(
+    resultado, attr(resultado, "ponto"), raios = c(500, 1500)
+  )
+  expect_false(fora$executado)
+  expect_match(fora$mensagem, "raio observado")
+})
+
+test_that("interpretacao de acessibilidade com um ponto nao imprime NA", {
+  resultado <- cria_resultado_espacial(matrix(c(100, 0), ncol = 2), raio_m = 1000)
+  acesso <- gs_analise_acessibilidade(resultado)
+  texto <- gs_interpretar_analise(
+    list(acessibilidade_media = acesso), resultado, raio_m = 1000
+  )$acessibilidade_media
+  expect_true(acesso$executado)
+  expect_false(grepl("NA", texto, fixed = TRUE))
+  expect_match(texto, "não definidos")
 })
 
 test_that("janela esferica contem pontos aceitos pela mesma metrica", {

@@ -57,8 +57,14 @@ Rscript scripts/baixar_tudo.R --camada equipamento_saude_ubs_posto_centro
 ```
 
 Os downloads usam paginação ordenada, conferência de contagem e IDs, CRS
-explícito e gravação atômica. Arquivos incompletos não substituem uma versão
-válida existente.
+explícito e promoção transacional dos pares CSV/GeoJSON. Leitores e aquisições
+usam bloqueios por diretório/camada; arquivos incompletos ou versões mistas não
+são consumidos pelo projeto.
+
+Após a aquisição, os GeoJSON/CSV em `data/` são tratados como entradas
+imutáveis e com o esquema fornecido pela fonte. As análises não acrescentam
+colunas nem reescrevem esses arquivos; metadados derivados são gravados somente
+em `saidas/`.
 
 ## Uma origem
 
@@ -145,6 +151,7 @@ saidas/comparacao_saude/
 ├── metricas.csv
 ├── comparacao_origens.csv
 ├── manifesto.csv
+├── resultado_lote.rds
 ├── relatorio_lote.md
 ├── figuras/
 │   ├── comparacao_contagens.png
@@ -171,6 +178,8 @@ Métricas escalares são normalizadas em `metricas.csv`.
 `metadados_consulta.csv` registra métrica/backend, raio e eventual truncamento;
 `amostragem_por_camada.csv` registra quantos itens estavam disponíveis, foram
 retidos ou omitidos em cada camada.
+Em `servicos_proximos.csv`, `distancia_m` é arredondada para exibição e
+`distancia_m_exata` preserva o valor usado nos filtros e cálculos.
 
 ## Análises disponíveis
 

@@ -181,7 +181,9 @@ gs_baixar_camada <- function(camada, filtro = NULL, dir = gs_pasta_dados(),
 
   total_esperado <- gs_contar(camada, filtro)
   if (!is.na(total_esperado) && total_esperado == 0) {
-    unlink(c(geo_path, csv_path), force = TRUE)
+    gs_promover_conjunto_atomico(
+      rep(NA_character_, 2), c(geo_path, csv_path)
+    )
     if (verbose) message("  [", base, "] nada encontrado — nenhum arquivo criado.")
     return(invisible(list(camada = base, total = 0, geojson = NULL, csv = NULL)))
   }
@@ -198,7 +200,9 @@ gs_baixar_camada <- function(camada, filtro = NULL, dir = gs_pasta_dados(),
   ))
   if (length(amostra) == 0) {
     gs_validar_feicoes_baixadas(amostra, total_esperado)
-    unlink(c(geo_path, csv_path), force = TRUE)
+    gs_promover_conjunto_atomico(
+      rep(NA_character_, 2), c(geo_path, csv_path)
+    )
     if (verbose) message("  [", base, "] nada encontrado — nenhum arquivo criado.")
     return(invisible(list(camada = base, total = 0, geojson = NULL, csv = NULL)))
   }
@@ -270,8 +274,8 @@ gs_baixar_camada <- function(camada, filtro = NULL, dir = gs_pasta_dados(),
     stage_csv <- file.path(stage, basename(csv_path))
     gs_escrever_csv(stage_geo, stage_csv)
   }
-  origens <- c(stage_geo, if (!is.null(stage_csv)) stage_csv)
-  destinos <- c(geo_path, if (!is.null(stage_csv)) csv_path)
+  origens <- c(stage_geo, if (!is.null(stage_csv)) stage_csv else NA_character_)
+  destinos <- c(geo_path, csv_path)
   gs_promover_conjunto_atomico(origens, destinos)
   csv_salvo <- if (csv) csv_path else NULL
 
@@ -314,17 +318,24 @@ gs_baixar_camadas <- function(camadas, filtro = NULL, dir = gs_pasta_dados(),
   resumo <- lapply(nomes, function(cam) {
     gs_baixar_camada(cam, filtro = filtro, dir = stage, csv = csv, verbose = verbose)
   })
-  origens <- unlist(lapply(resumo, function(r) {
-    Filter(Negate(is.null), list(r$geojson, r$csv))
-  }), use.names = FALSE)
-  if (length(origens) > 0) {
-    destinos <- file.path(dir, basename(origens))
-    gs_promover_conjunto_atomico(origens, destinos)
+  origens <- character(0)
+  destinos <- character(0)
+  for (i in seq_along(resumo)) {
+    base_saida <- gs_nome_saida_camada(nomes[i], filtro)
+    destinos <- c(
+      destinos,
+      file.path(dir, paste0(base_saida, c(".geojson", ".csv")))
+    )
+    origens <- c(
+      origens,
+      if (is.null(resumo[[i]]$geojson)) NA_character_ else resumo[[i]]$geojson,
+      if (is.null(resumo[[i]]$csv)) NA_character_ else resumo[[i]]$csv
+    )
   }
+  gs_promover_conjunto_atomico(origens, destinos)
   for (i in seq_along(resumo)) {
     if (is.null(resumo[[i]]$geojson)) {
-      base_saida <- gs_nome_saida_camada(nomes[i], filtro)
-      unlink(file.path(dir, paste0(base_saida, c(".geojson", ".csv"))), force = TRUE)
+      next
     } else {
       resumo[[i]]$geojson <- file.path(dir, basename(resumo[[i]]$geojson))
       if (!is.null(resumo[[i]]$csv)) {

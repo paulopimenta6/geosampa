@@ -9,7 +9,8 @@
 
 # --- Lista as camadas disponíveis localmente (nomes base dos CSVs) ---------
 gs_camadas_local <- function(dir = gs_caminho_dados()) {
-  sort(gsub("\\.csv$", "", basename(list.files(dir, pattern = "\\.csv$"))))
+  arquivos <- gs_listar_arquivos_consistente(dir, pattern = "\\.csv$")
+  sort(gsub("\\.csv$", "", basename(arquivos)))
 }
 
 gs_parar_indice_ausente <- function(mensagem) {
@@ -38,11 +39,13 @@ gs_chave_cache_indice <- function(dir, arquivos) {
 # sessão (options); use force = TRUE para reconstruir.
 # Colunas: cep, camada, latitude, longitude, nm_equipamento,
 #          nm_bairro_equipamento, tx_endereco_equipamento.
-gs_indice_cep <- function(dir = gs_caminho_dados(), force = FALSE) {
+gs_indice_cep_impl <- function(dir = gs_caminho_dados(), force = FALSE) {
   if (!is.logical(force) || length(force) != 1 || is.na(force)) {
     stop("`force` deve ser TRUE ou FALSE.")
   }
-  arquivos <- sort(list.files(dir, pattern = "\\.csv$", full.names = TRUE))
+  arquivos <- sort(gs_listar_arquivos_consistente(
+    dir, pattern = "\\.csv$", full.names = TRUE
+  ))
   chave_cache <- gs_chave_cache_indice(dir, arquivos)
   cache <- getOption("gs.indice_cep")
   if (!force && is.data.frame(cache) &&
@@ -134,6 +137,12 @@ gs_indice_cep <- function(dir = gs_caminho_dados(), force = FALSE) {
   attr(idx, "gs.chave_cache") <- chave_cache
   options(gs.indice_cep = idx)
   idx
+}
+
+gs_indice_cep <- function(dir = gs_caminho_dados(), force = FALSE) {
+  executar <- function() gs_indice_cep_impl(dir = dir, force = force)
+  if (!dir.exists(dir)) return(executar())
+  gs_com_lock(gs_lock_diretorio(dir), executar())
 }
 
 # --- Coordenada "representante" de cada CEP (mediana das ocorrências) -------

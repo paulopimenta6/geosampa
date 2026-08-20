@@ -45,7 +45,7 @@ test_that("gs_osrm_dist_m converte para metros conforme a versão do osrm", {
   nova <- utils::packageVersion("osrm") >= "4.0.0"
   d <- gs_osrm_dist_m(c(1.234, 5.678))
   if (nova) {
-    expect_equal(d, c(1.2, 5.7))
+    expect_equal(d, c(1.234, 5.678))
   } else {
     expect_equal(d, c(1234, 5678))
   }

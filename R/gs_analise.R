@@ -12,8 +12,12 @@
 
 # --- Utilitários internos -----------------------------------------------------
 gs_dominio_consulta <- function(resultado, ponto = NULL, raio_m = NULL) {
-  if (is.null(ponto)) ponto <- attr(resultado, "ponto")
-  if (is.null(raio_m)) raio_m <- attr(resultado, "raio_m")
+  ponto_armazenado <- attr(resultado, "ponto")
+  raio_armazenado <- attr(resultado, "raio_m")
+  ponto_informado <- !is.null(ponto)
+  raio_informado <- !is.null(raio_m)
+  if (!ponto_informado) ponto <- ponto_armazenado
+  if (!raio_informado) raio_m <- raio_armazenado
 
   if (isTRUE(attr(resultado, "amostra_truncada"))) {
     return(list(
@@ -37,25 +41,39 @@ gs_dominio_consulta <- function(resultado, ponto = NULL, raio_m = NULL) {
   }
 
   raio_m <- suppressWarnings(as.numeric(raio_m)[1])
+  raio_original <- suppressWarnings(as.numeric(raio_armazenado)[1])
+  if (raio_informado && !is.na(raio_original) && is.finite(raio_original) &&
+      (!is.finite(raio_m) || abs(raio_m - raio_original) > 1e-7)) {
+    return(list(
+      executado = FALSE,
+      mensagem = paste0(
+        "`raio_m` não pode alterar o domínio armazenado no resultado (",
+        raio_original, " m). Refaça a consulta para usar outro raio."
+      )
+    ))
+  }
   if (length(raio_m) == 0 || !is.finite(raio_m) || raio_m <= 0) {
     return(list(executado = FALSE,
                 mensagem = "Raio da consulta ausente ou inválido."))
   }
 
-  ponto_sf <- NULL
-  if (is.list(ponto) && !is.null(ponto$sf)) {
-    ponto_sf <- ponto$sf
-  } else if (inherits(ponto, c("sf", "sfc"))) {
-    ponto_sf <- ponto
-  } else if (is.list(ponto) &&
-             all(c("longitude", "latitude") %in% names(ponto))) {
-    xy <- suppressWarnings(as.numeric(c(ponto$longitude[1], ponto$latitude[1])))
-    if (length(xy) == 2 && all(is.finite(xy))) {
-      ponto_sf <- sf::st_sfc(sf::st_point(xy), crs = gs_epsg$wgs84)
+  como_ponto_sf <- function(x) {
+    ponto_sf <- NULL
+    if (is.list(x) && !is.null(x$sf)) {
+      ponto_sf <- x$sf
+    } else if (inherits(x, c("sf", "sfc"))) {
+      ponto_sf <- x
+    } else if (is.list(x) &&
+               all(c("longitude", "latitude") %in% names(x))) {
+      xy <- suppressWarnings(as.numeric(c(x$longitude[1], x$latitude[1])))
+      if (length(xy) == 2 && all(is.finite(xy))) {
+        ponto_sf <- sf::st_sfc(sf::st_point(xy), crs = gs_epsg$wgs84)
+      }
     }
+    if (inherits(ponto_sf, "sf")) ponto_sf <- sf::st_geometry(ponto_sf)
+    ponto_sf
   }
-
-  if (inherits(ponto_sf, "sf")) ponto_sf <- sf::st_geometry(ponto_sf)
+  ponto_sf <- como_ponto_sf(ponto)
   if (!inherits(ponto_sf, "sfc") || length(ponto_sf) != 1 ||
       is.na(sf::st_crs(ponto_sf)) || any(sf::st_is_empty(ponto_sf))) {
     return(list(executado = FALSE,
@@ -64,6 +82,23 @@ gs_dominio_consulta <- function(resultado, ponto = NULL, raio_m = NULL) {
   if (!identical(as.character(sf::st_geometry_type(ponto_sf))[1], "POINT")) {
     return(list(executado = FALSE,
                 mensagem = "A geometria da consulta deve ser um único ponto."))
+  }
+  if (ponto_informado && !is.null(ponto_armazenado)) {
+    ponto_original_sf <- como_ponto_sf(ponto_armazenado)
+    deslocamento <- tryCatch(as.numeric(sf::st_distance(
+      sf::st_transform(ponto_sf, gs_epsg$oficial),
+      sf::st_transform(ponto_original_sf, gs_epsg$oficial)
+    )), error = function(e) Inf)
+    if (length(deslocamento) != 1 || !is.finite(deslocamento) ||
+        deslocamento > 0.01) {
+      return(list(
+        executado = FALSE,
+        mensagem = paste0(
+          "`ponto` não pode alterar a origem armazenada no resultado. ",
+          "Refaça a consulta para usar outra origem."
+        )
+      ))
+    }
   }
 
   ponto_utm <- tryCatch(
@@ -176,6 +211,41 @@ gs_moran_i <- function(x, lw) {
   )$I)
 }
 
+gs_distancias_resultado <- function(resultado) {
+  if ("distancia_m_exata" %in% names(resultado)) {
+    return(suppressWarnings(as.numeric(resultado$distancia_m_exata)))
+  }
+  if (!"distancia_m" %in% names(resultado)) return(numeric(0))
+  distancia <- resultado$distancia_m
+  if (is.factor(distancia)) distancia <- as.character(distancia)
+  distancia <- suppressWarnings(as.numeric(distancia))
+  legado <- attr(resultado, "distancias_m_exatas")
+  if (is.numeric(legado) && length(legado) == length(distancia) &&
+      all(is.na(legado) == is.na(distancia)) &&
+      isTRUE(all.equal(round(legado, 1), distancia, check.attributes = FALSE))) {
+    seguro <- rep(FALSE, length(distancia))
+    grupos <- split(seq_along(distancia), distancia, drop = TRUE)
+    for (indices in grupos) {
+      valores <- legado[indices]
+      seguro[indices] <- length(indices) == 1 ||
+        length(unique(valores[is.finite(valores)])) <= 1
+    }
+    distancia[seguro] <- legado[seguro]
+  }
+  distancia
+}
+
+gs_requer_amostra_completa <- function(resultado, analise) {
+  if (!isTRUE(attr(resultado, "amostra_truncada"))) return(NULL)
+  list(
+    executado = FALSE,
+    mensagem = paste0(
+      "A análise '", analise, "' requer todas as ocorrências no raio, mas ",
+      "`n_por_camada` omitiu resultados. Refaça a busca sem esse limite."
+    )
+  )
+}
+
 gs_resumo_distancias <- function(x) {
   if (is.factor(x)) x <- as.character(x)
   x <- suppressWarnings(as.numeric(x))
@@ -212,15 +282,13 @@ gs_analise_descritivas <- function(resultado) {
     return(list(executado = FALSE,
                 mensagem = "Resultado sem a coluna numérica 'distancia_m'."))
   }
-  medidas <- gs_resumo_distancias(resultado$distancia_m)
+  distancia <- gs_distancias_resultado(resultado)
+  medidas <- gs_resumo_distancias(distancia)
   if (medidas[["n"]] == 0) {
     return(list(executado = FALSE,
                 mensagem = "Nenhuma distância válida para a análise descritiva."))
   }
 
-  distancia <- resultado$distancia_m
-  if (is.factor(distancia)) distancia <- as.character(distancia)
-  distancia <- suppressWarnings(as.numeric(distancia))
   validos <- is.finite(distancia)
   dados_plot <- resultado[validos, , drop = FALSE]
   dados_plot$distancia_m <- distancia[validos]
@@ -254,6 +322,7 @@ gs_analise_descritivas <- function(resultado) {
 
   list(
     executado        = TRUE,
+    amostra_truncada = isTRUE(attr(resultado, "amostra_truncada")),
     n_total          = nrow(resultado),
     n_por_camada     = n_por_camada,
     n_por_tipo       = n_por_tipo,
@@ -298,20 +367,23 @@ gs_analise_vizinho <- function(resultado) {
     return(list(executado = FALSE,
                 mensagem = "Nenhum serviço válido para identificar o vizinho mais próximo."))
   }
-  distancia <- suppressWarnings(as.numeric(resultado$distancia_m))
+  distancia <- gs_distancias_resultado(resultado)
   resultado <- resultado[is.finite(distancia), , drop = FALSE]
-  resultado$distancia_m <- distancia[is.finite(distancia)]
+  resultado$.distancia_exata <- distancia[is.finite(distancia)]
   if (nrow(resultado) == 0) {
     return(list(executado = FALSE,
                 mensagem = "Nenhuma distância finita para identificar o vizinho mais próximo."))
   }
   por_camada <- do.call(rbind, lapply(split(resultado, resultado$camada), function(d) {
-    i <- which.min(d$distancia_m)
+    i <- which.min(d$.distancia_exata)
     data.frame(camada = d$camada[i], nome = d$nome[i],
-               distancia_m = d$distancia_m[i], stringsAsFactors = FALSE)
+               distancia_m = d$distancia_m[i],
+               distancia_m_exata = d$.distancia_exata[i],
+               stringsAsFactors = FALSE)
   }))
   rownames(por_camada) <- NULL
-  i <- which.min(resultado$distancia_m)
+  i <- which.min(resultado$.distancia_exata)
+  resultado$.distancia_exata <- NULL
   list(
     executado              = TRUE,
     vizinho_mais_proximo = resultado[i, , drop = FALSE],
@@ -447,6 +519,8 @@ gs_analise_voronoi <- function(resultado, ponto = NULL, raio_m = NULL) {
 
 # --- Densidade de kernel dos serviços -----------------------------------------
 gs_analise_kde <- function(resultado, ponto) {
+  incompleta <- gs_requer_amostra_completa(resultado, "kde")
+  if (!is.null(incompleta)) return(incompleta)
   if (!is.data.frame(resultado) || nrow(resultado) < 3 ||
       !all(c("longitude", "latitude") %in% names(resultado))) {
     return(list(executado = FALSE,
@@ -491,12 +565,24 @@ gs_analise_kde <- function(resultado, ponto) {
 # --- Raios progressivos: oportunidades acumuladas ------------------------------
 # Devolve a contagem acumulada por raio (tabela) e a curva correspondente.
 gs_analise_raios <- function(resultado, ponto, raios = c(500, 1000, 2000)) {
+  incompleta <- gs_requer_amostra_completa(resultado, "raios_progressivos")
+  if (!is.null(incompleta)) return(incompleta)
   raios <- suppressWarnings(as.numeric(raios))
   if (length(raios) == 0 || any(!is.finite(raios)) || any(raios <= 0)) {
     return(list(executado = FALSE,
                 mensagem = "Os raios progressivos devem ser números positivos."))
   }
-  distancias <- suppressWarnings(as.numeric(resultado$distancia_m))
+  raio_consulta <- suppressWarnings(as.numeric(attr(resultado, "raio_m"))[1])
+  if (is.finite(raio_consulta) && any(raios > raio_consulta)) {
+    return(list(
+      executado = FALSE,
+      mensagem = paste0(
+        "Os raios progressivos não podem exceder o raio observado de ",
+        raio_consulta, " m."
+      )
+    ))
+  }
+  distancias <- gs_distancias_resultado(resultado)
   distancias <- distancias[is.finite(distancias)]
   if (length(distancias) == 0) {
     return(list(executado = FALSE,
@@ -622,7 +708,7 @@ gs_analise_moran <- function(resultado, celula_m = gs_celula_hex_m,
   }
   lon <- suppressWarnings(as.numeric(resultado$longitude))
   lat <- suppressWarnings(as.numeric(resultado$latitude))
-  distancia <- suppressWarnings(as.numeric(resultado$distancia_m))
+  distancia <- gs_distancias_resultado(resultado)
   validos <- is.finite(lon) & is.finite(lat) & is.finite(distancia)
   d <- resultado[validos, , drop = FALSE]
   d$longitude <- lon[validos]
@@ -777,12 +863,12 @@ gs_analise_rede <- function(resultado, ponto) {
   destinos_sf <- sf::st_as_sf(
     resultado, coords = c("longitude", "latitude"), crs = gs_epsg$wgs84
   )
-  dist_reta_m <- as.numeric(sf::st_distance(origem_sf, destinos_sf))
+  dist_reta_m <- gs_distancias_s2(origem_sf, destinos_sf)
   out <- data.frame(
     camada            = resultado$camada,
     nome              = resultado$nome,
     distancia_reta_m  = round(dist_reta_m, 1),
-    distancia_rede_m  = dist_rede_m,
+    distancia_rede_m  = round(dist_rede_m, 1),
     razao_rede_reta   = round(dist_rede_m / pmax(dist_reta_m, 1), 2),
     stringsAsFactors  = FALSE
   )
@@ -797,18 +883,18 @@ gs_analise_rede <- function(resultado, ponto) {
 # Medidas robustas para distribuições assimétricas (comuns em distâncias):
 # mediana (destaque), P25/P75, IQR e CV além de média/desvio-padrão.
 gs_analise_acessibilidade <- function(resultado) {
+  incompleta <- gs_requer_amostra_completa(resultado, "acessibilidade_media")
+  if (!is.null(incompleta)) return(incompleta)
   if (!is.data.frame(resultado) || !"distancia_m" %in% names(resultado)) {
     return(list(executado = FALSE,
                 mensagem = "Resultado sem a coluna numérica 'distancia_m'."))
   }
-  medidas <- gs_resumo_distancias(resultado$distancia_m)
+  distancia <- gs_distancias_resultado(resultado)
+  medidas <- gs_resumo_distancias(distancia)
   if (medidas[["n"]] == 0) {
     return(list(executado = FALSE,
                 mensagem = "Nenhuma distância válida para analisar acessibilidade."))
   }
-  distancia <- resultado$distancia_m
-  if (is.factor(distancia)) distancia <- as.character(distancia)
-  distancia <- suppressWarnings(as.numeric(distancia))
   validos <- is.finite(distancia)
   dados <- resultado[validos, , drop = FALSE]
   dados$distancia_m <- distancia[validos]
@@ -938,8 +1024,10 @@ gs_analise_cobertura <- function(resultado, ponto = NULL,
 # gráfico ECDF que permite ver visualmente o percentil correspondente a cada
 # raio.
 gs_analise_raio_otimo <- function(resultado, p = c(0.5, 0.75, 0.9, 0.95)) {
+  incompleta <- gs_requer_amostra_completa(resultado, "raio_otimo")
+  if (!is.null(incompleta)) return(incompleta)
   p <- suppressWarnings(as.numeric(p))
-  distancias <- suppressWarnings(as.numeric(resultado$distancia_m))
+  distancias <- gs_distancias_resultado(resultado)
   distancias <- distancias[is.finite(distancias)]
   if (length(distancias) == 0) {
     return(list(executado = FALSE,
@@ -1455,14 +1543,16 @@ gs_analise_ripley_k <- function(resultado, rmax_m = NULL, ponto = NULL,
                 mensagem = "Não foi possível converter a janela observacional para a função K."))
   }
   dentro <- spatstat.geom::inside.owin(coords[, 1], coords[, 2], w = win)
+  n_fora <- sum(!dentro)
   coords <- coords[dentro, , drop = FALSE]
   if (nrow(coords) < 4) {
     return(list(executado = FALSE,
                 mensagem = "Menos de 4 pontos dentro do domínio da consulta."))
   }
   dup <- duplicated(as.data.frame(coords))
+  n_dup <- sum(dup)
   if (any(dup)) {
-    message("  ripley_k: removidos ", sum(dup), " pontos duplicados.")
+    message("  ripley_k: removidos ", n_dup, " pontos duplicados.")
     coords <- coords[!dup, , drop = FALSE]
   }
   if (nrow(coords) < 4) {
@@ -1489,7 +1579,8 @@ gs_analise_ripley_k <- function(resultado, rmax_m = NULL, ponto = NULL,
                   title = "Função K de Ripley transformada",
                    subtitle = "Diagnóstico sem envelope: desvios de zero não implicam significância") +
     ggplot2::theme_minimal()
-  list(executado = TRUE, n = ppp$n, raio_dominio_m = dominio$raio_m,
+  list(executado = TRUE, n = ppp$n, n_fora_dominio = n_fora,
+       n_deduplicados = n_dup, raio_dominio_m = dominio$raio_m,
        area_dominio_km2 = as.numeric(sf::st_area(dominio$dominio)) / 1e6,
        tipo_janela = dominio$tipo_distancia,
        correcao = coluna, curva = df, objeto = K, grafico = grafico,
@@ -1501,6 +1592,8 @@ gs_analise_ripley_k <- function(resultado, rmax_m = NULL, ponto = NULL,
 
 # --- KDE com banda estimada (Silverman) ----------------------------------------
 gs_analise_kde_banda <- function(resultado, ponto) {
+  incompleta <- gs_requer_amostra_completa(resultado, "kde_banda")
+  if (!is.null(incompleta)) return(incompleta)
   if (!requireNamespace("MASS", quietly = TRUE)) {
     return(list(executado = FALSE,
                 mensagem = "Pacote 'MASS' não instalado para estimar a banda da KDE."))
@@ -1550,7 +1643,7 @@ gs_baixar_distritos <- function(dir = gs_pasta_dados(), force = FALSE) {
   if (!file.exists(path) || force) {
     gs_baixar_camada(cam, dir = dir, csv = TRUE, verbose = TRUE)
   }
-  distritos <- sf::st_read(path, quiet = TRUE)
+  distritos <- gs_com_lock_arquivo(path, sf::st_read(path, quiet = TRUE))
   # Geometrias do GeoSampa podem ter auto-interseções; corrige antes do uso.
   sf::st_make_valid(distritos)
 }
@@ -1754,6 +1847,7 @@ gs_analise_moran_distrital <- function(resultado, dir = gs_pasta_dados(),
        variavel = "densidade_por_km2", correcao_p_local = "BH",
        n_distritos = nrow(dist), raio_m = cruzamento$raio_m,
        tipo_janela = cruzamento$tipo_janela,
+       n_sem_distrito = cruzamento$n_sem_distrito,
        n_atribuicoes_ambiguas = cruzamento$n_atribuicoes_ambiguas,
        por_distrito = sf::st_drop_geometry(dist),
        mapa = mapa, objeto = teste)
@@ -1944,7 +2038,7 @@ gs_interpretar_analise <- function(analises, resultado, raio_m) {
   executada <- function(x) {
     !is.null(x) && !(is.list(x) && identical(x[["executado"]], FALSE))
   }
-  d <- resultado$distancia_m
+  d <- gs_distancias_resultado(resultado)
 
   if (!is.null(analises$descritivas) &&
       !identical(analises$descritivas$executado, FALSE)) {
@@ -1956,9 +2050,18 @@ gs_interpretar_analise <- function(analises, resultado, raio_m) {
     } else {
       ""
     }
+    abertura <- if (isTRUE(analises$descritivas$amostra_truncada)) {
+      fmt(
+        "Foram retidos %d serviço(s) após o limite `n_por_camada`; este resumo não representa todas as ocorrências no raio de %d m.",
+        analises$descritivas$n_total, raio_m
+      )
+    } else {
+      fmt("Foram encontrados %d serviço(s) num raio de %d m.",
+          analises$descritivas$n_total, raio_m)
+    }
     out$descritivas <- fmt(
-      "Foram encontrados %d serviço(s) num raio de %d m. As distâncias vão de %.0f m a %.0f m, com mediana de %.0f m, MAD de %.0f m e IQR de %.0f m (P25 %.0f m; P75 %.0f m). A média é %.0f m%s.",
-      analises$descritivas$n_total, raio_m,
+      "%s As distâncias vão de %.0f m a %.0f m, com mediana de %.0f m, MAD de %.0f m e IQR de %.0f m (P25 %.0f m; P75 %.0f m). A média é %.0f m%s.",
+      abertura,
       r$min, r$max, r$mediana, r$mad, r$iqr, r$p25, r$p75, r$media, ic)
   }
 
@@ -1981,9 +2084,17 @@ gs_interpretar_analise <- function(analises, resultado, raio_m) {
     } else {
       ""
     }
+    dispersao <- if (isTRUE(is.finite(g$sd) && is.finite(g$cv))) {
+      fmt(" com desvio-padrão de %.0f m (CV = %.1f%%%s)", g$sd, g$cv, ic)
+    } else {
+      " (desvio-padrão e CV não definidos com uma única observação)"
+    }
     out$acessibilidade_media <- fmt(
-      "Acessibilidade: mediana de %.0f m, MAD de %.0f m, P25 de %.0f m e P75 de %.0f m (IQR = %.0f m). A média é %.0f m com desvio-padrão de %.0f m (CV = %.1f%%%s).",
-      g$mediana, g$mad, g$p25, g$p75, g$iqr, g$media, g$sd, g$cv, ic)
+      paste0(
+        "Acessibilidade: mediana de %.0f m, MAD de %.0f m, P25 de %.0f m ",
+        "e P75 de %.0f m (IQR = %.0f m). A média é %.0f m%s."
+      ),
+      g$mediana, g$mad, g$p25, g$p75, g$iqr, g$media, dispersao)
   }
 
   if (!is.null(analises$raio_otimo) && !is.null(analises$raio_otimo$percentis)) {

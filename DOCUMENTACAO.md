@@ -725,6 +725,11 @@ gs_salvar_analises(
 Cada pasta de origem também contém `metadados_consulta.csv` (métrica,
 backend, raio, limite e indicador de truncamento) e
 `amostragem_por_camada.csv` (quantidades disponíveis, retidas e omitidas).
+Esses arquivos são derivados: os GeoJSON/CSV adquiridos em `data/` mantêm a
+estrutura original da fonte e não são modificados durante a análise.
+O resultado derivado `servicos_proximos.csv` mantém duas distâncias:
+`distancia_m`, arredondada para apresentação, e `distancia_m_exata`, usada em
+filtros, estatísticas e reprodução dos valores publicados.
 
 ### 10.13 Limitações conhecidas ⚠️
 
@@ -782,6 +787,9 @@ Cada origem recebe sua própria pasta de tabelas, geometrias, figuras e
 relatórios. Na raiz da execução são gravados `origens.csv`, `servicos.csv`,
 `metricas.csv`, `comparacao_origens.csv`, plots comparativos e
 `relatorio_lote.md`.
+O status é `parcial` quando a busca termina, mas alguma análise solicitada não
+pode ser executada; os nomes dessas análises ficam registrados em `mensagem` e
+nos relatórios.
 
 Também há uma interface de terminal:
 
