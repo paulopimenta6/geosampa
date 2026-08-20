@@ -9,9 +9,15 @@
 # --- Busca registros de metadados por palavra-chave -------------------------
 # Ex.: gs_metadados("saude") -> data.frame com uuid, categoria e data.
 gs_metadados <- function(termo, de = 1, ate = 20) {
-  resp <- httr::GET(paste0(gs_urls$metadados, "/q"),
-                    query = list(any = termo, from = de, to = ate),
-                    httr::timeout(60))
+  if (length(termo) != 1 || is.na(termo) || !nzchar(trimws(as.character(termo)))) {
+    stop("`termo` deve ser um texto escalar não vazio.")
+  }
+  de <- as.integer(gs_validar_numero_escalar(de, "de", minimo = 1, inteiro = TRUE))
+  ate <- as.integer(gs_validar_numero_escalar(ate, "ate", minimo = de, inteiro = TRUE))
+  resp <- gs_http_get(
+    paste0(gs_urls$metadados, "/q"),
+    query = list(any = termo, from = de, to = ate), timeout_s = 60
+  )
   httr::stop_for_status(resp)
   xml <- xml2::read_xml(httr::content(resp, as = "text", encoding = "UTF-8"))
 
@@ -46,9 +52,13 @@ gs_metadados <- function(termo, de = 1, ate = 20) {
 # --- Detalhes de um registro (título, resumo, órgão responsável) ------------
 # `uuid` pode vir de gs_metadados(). Ex.: gs_metadado_registro("12f1...")
 gs_metadado_registro <- function(uuid) {
+  if (length(uuid) != 1 || is.na(uuid) || !nzchar(trimws(as.character(uuid)))) {
+    stop("`uuid` deve ser um identificador escalar não vazio.")
+  }
   url <- paste0(gs_urls$geonet_api, "/records/", uuid)
-  resp <- httr::GET(url, httr::add_headers(Accept = "application/xml"),
-                    httr::timeout(60))
+  resp <- gs_http_get(
+    url, timeout_s = 60, httr::add_headers(Accept = "application/xml")
+  )
   httr::stop_for_status(resp)
   xml <- xml2::read_xml(httr::content(resp, as = "text", encoding = "UTF-8"))
 

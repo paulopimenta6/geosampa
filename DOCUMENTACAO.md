@@ -1,722 +1,817 @@
-# 🗺️ O Baú de Tesouros do GeoSampa
+# 🗺️ Manual da Expedição GeoSampa
 
-> Uma viagem divertida para entender o que é o GeoSampa, o que tem lá dentro
-> e como criamos um "garimpeiro robô" que baixa dados de equipamentos públicos
-> da cidade de São Paulo — tudo com linguagem simples e exemplos prontos.
+Bem-vindo! Este é um guia para usar o projeto mesmo que você nunca tenha aberto
+o R, ouvido falar em mapa digital ou trabalhado com dados públicos.
 
----
+Imagine São Paulo como uma cidade feita de várias folhas transparentes. Em uma
+folha estão as UBS; em outra, as escolas; em outra, feiras, museus e outros
+serviços. O GeoSampa é o grande armário que guarda essas folhas. Este projeto é
+o seu **kit de exploração**: ele busca as folhas, aponta o que existe perto de
+um lugar e transforma a descoberta em mapa e relatório.
 
-## 1. Era uma vez... a cidade de São Paulo
+> 🎯 **Missão do projeto:** responder perguntas como “quais serviços públicos
+> existem perto deste CEP?” de modo reproduzível e usando dados oficiais da
+> Prefeitura de São Paulo.
 
-São Paulo tem mais de **11 milhões de habitantes**, **310 setores**, **55 mil quadras**
-e **2,5 milhões de lotes**. Para cuidar de uma cidade tão gigante, a Prefeitura precisa
-saber **onde** estão as coisas: onde tem posto de saúde, escola, biblioteca, praça,
-parque, feira livre, hospital... Isso é chamado de **dado geográfico**: um dado que
-tem um **endereço no mapa** (coordenadas), além de informações como nome, telefone e
-horário de funcionamento.
+## 🧭 Como usar este manual
 
-Mas onde a Prefeitura guarda tudo isso? Num lugar muito especial chamado...
+Não é preciso ler tudo de uma vez. Escolha o caminho que mais combina com sua
+missão:
 
-## 2. O GeoSampa: o mapa digital da cidade 🏙️
+| Quero... | Vá para... |
+|---|---|
+| Fazer meu primeiro mapa | [Missão 1](#missao-1-preparar-a-mochila) e [Missão 4](#missao-4-ligar-o-radar) |
+| Baixar dados públicos | [Missão 2](#missao-2-abrir-o-bau-de-dados) |
+| Pesquisar pelo CEP da minha casa | [Missão 3](#missao-3-encontrar-o-ponto-de-partida) |
+| Entender distâncias | [Missão 5](#missao-5-escolher-a-regua) |
+| Criar um mapa | [Missão 6](#missao-6-desenhar-a-descoberta) |
+| Criar relatórios e análises | [Missões 7 e 8](#missao-7-fazer-perguntas-aos-dados) |
+| Comparar vários lugares | [Missão 9](#missao-9-explorar-varios-locais) |
+| Resolver um problema | [Socorro](#-socorro-erros-comuns) |
 
-O **GeoSampa** é o portal de mapas da Prefeitura de São Paulo, disponível em
-[geosampa.prefeitura.sp.gov.br](https://geosampa.prefeitura.sp.gov.br). Pense nele
-como um **baú de tesouros cartográficos**: lá dentro existem **mais de 300 camadas
-de informações** sobre a cidade — saúde, educação, transporte, zoneamento, IPTU,
-riscos, vegetação e muito mais.
+## 🌆 O mapa mental da cidade digital
 
-Imagine cada camada como uma **folha transparente** desenhada em cima do mapa da cidade:
+### O que é GeoSampa?
 
-- Uma folha com todos os postos de saúde 🏥
-- Outra com as escolas 🏫
-- Outra com as praças e parques 🌳
-- Outra com as feiras livres 🍅
+O **GeoSampa** é o portal de dados geográficos da Prefeitura de São Paulo. Ele
+guarda informações sobre a cidade: saúde, educação, cultura, meio ambiente,
+limites de distrito e muito mais.
 
-Junte todas as folhas e você tem a cidade completa em detalhes!
+Cada conjunto de informações é uma **camada**. Pense em uma camada como uma
+folha transparente colocada sobre um mapa:
 
-### Como funciona por dentro
+- 🏥 `equipamento_saude_ubs_posto_centro`: postos e UBS.
+- 🏫 Camadas de educação: escolas, CEUs e outros equipamentos.
+- 🍅 `equipamento_feira_livre`: feiras.
+- 🎭 Camadas de cultura: bibliotecas, museus e espaços culturais.
 
-O GeoSampa foi construído com tecnologias abertas (GeoServer + OpenLayers) e usa
-padrões internacionais chamados **OGC**. O importante para nós são os **serviços web**,
-que são como "portas" por onde os dados saem do baú. São duas portas principais:
+Uma camada pode conter **pontos**, como uma UBS, ou **áreas**, como um distrito.
+O radar de serviços próximos usa somente as camadas de pontos que têm latitude
+e longitude no arquivo CSV.
 
-| Porta | Nome | O que ela entrega? | Analogia |
-|-------|------|---------------------|----------|
-| 🖼️ | **WMS** (Web Map Service) | Imagens do mapa | Um **espelho**: mostra, mas você não pode tocar |
-| 🗄️ | **WFS** (Web Feature Service) | Os dados de verdade (vetores) | Um **baú**: abre e você pega os dados |
+### O que são CEP, coordenada e raio?
 
-- **WMS** serve imagens prontas (mapas). Útil para olhar, mas não dá para cruzar dados.
-- **WFS** entrega os **dados brutos** com coordenadas. É por aqui que o nosso
-  "garimpeiro robô" entra! 🦾
+- **CEP** é o código usado para localizar um endereço. Pode representar uma
+  rua inteira, uma instituição ou uma faixa de endereços; não é sempre um ponto
+  exato no mapa.
+- **Coordenadas** são dois números que indicam uma posição: latitude e
+  longitude. São Paulo fica aproximadamente em `-23.55, -46.63`.
+- **Raio** é o tamanho do círculo de busca. `raio_m = 2000` significa procurar
+  até 2.000 metros do ponto de partida.
 
-> ⚠️ Curiosidade: a página visual do GeoSampa tem uma trava de segurança (um desafio
-> de JavaScript) que impede robôs de entrarem pela porta da frente. Por isso, a
-> maneira correta e **oficial** de baixar dados é usar as portas WMS/WFS — que são
-> abertas a qualquer pessoa. É exatamente o que nosso sistema faz.
-
-### O idioma dos mapas (projeção cartográfica) 🌐
-
-Coordenadas no mapa são como um "idioma". O GeoSampa fala vários idiomas, mas o
-**oficial** (desde 2014) é o **SIRGAS2000 / UTM 23S**, código **EPSG:31983**.
-
-- **EPSG** é um catálogo mundial que dá números para cada "idioma" de coordenadas.
-- UTM 23S é um jeito de "achatar" a região de São Paulo para medir em **metros**.
-- Para planilhas, costumamos converter para **WGS84 (EPSG:4326)**, que usa
-  **latitude e longitude em graus** — o formato que o Google Maps entende.
-
-Nosso sistema respeita os dois idiomas:
-- O arquivo **.geojson** fica no idioma oficial (EPSG:31983), perfeito para GIS.
-- O arquivo **.csv** ganha colunas `latitude` e `longitude` em graus (EPSG:4326),
-  fácil de abrir em qualquer planilha.
-
----
-
-## 3. E os "documentos de identidade" dos dados? (Metadados) 📇
-
-Toda camada de dados tem um **metadado** — que significa literalmente **"dados sobre
-os dados"**. É o RG da camada: diz quem produziu, do que se trata, desde quando
-existe, em que escala, qual a periodicidade de atualização.
-
-O GeoSampa mantém esses documentos num **Catálogo de Metadados Geográficos**
-(baseado no software livre **GeoNetwork**), disponível em
-[metadados.geosampa.prefeitura.sp.gov.br](https://metadados.geosampa.prefeitura.sp.gov.br).
-
-Quando você pesquisa uma camada, o catálogo devolve um **UUID** (uma "impressão
-digital" única) e um registro com **título, resumo e órgão responsável**. Isso é
-importante para você saber **em quem confiar** na hora de usar o dado.
-
----
-
-## 4. Nossa missão: o "Garimpeiro de Equipamentos" 🦾
-
-A Prefeitura disponibiliza camadas de **equipamentos públicos** — todos aqueles
-pontos da cidade que prestam serviços: UBS, hospitais, CEUs, escolas, CRAS,
-bibliotecas, museus, centros esportivos, feiras livres, mercados, praças, e por
-aí vai. São **48 camadas** e mais de **18 mil equipamentos**!
-
-Criamos um sistema em **R** que:
-
-1. 🗂️ **Pergunta ao GeoSampa** quais camadas existem (via GetCapabilities).
-2. 🔍 **Acha** as camadas de equipamentos (as que têm o prefixo `equipamento_`).
-3. ⬇️ **Baixa** cada uma pelo WFS, em páginas (para não sobrecarregar o servidor).
-4. 💾 **Salva** em dois formatos: **GeoJSON** (o mapa) e **CSV** (a tabela).
-5. 📇 **Consulta os metadados** das camadas no catálogo.
-
-### Onde mora o código
-
-```
-geosampa/
-├── R/
-│   ├── 00_config.R        → endereços, projeções e pastas
-│   ├── gs_camadas.R       → catálogo de camadas (GetCapabilities)
-│   ├── gs_baixar.R        → o download de verdade (WFS → GeoJSON + CSV)
-│   └── gs_metadados.R     → consulta ao catálogo de metadados
-├── scripts/
-│   └── baixar_tudo.R      → o botão "baixar tudo"
-├── data/                  → os tesouros baixados (GeoJSON + CSV)
-├── DOCUMENTACAO.md        → este documento
-└── README.md              → guia rápido
-```
-
-### As ferramentas do garimpeiro 🧰
-
-| Função | O que faz |
-|--------|-----------|
-| `gs_camadas_disponiveis()` | Lista todas as camadas que o GeoSampa oferece |
-| `gs_catalogo_equipamentos()` | Mostra só as camadas de equipamentos públicos |
-| `gs_buscar_camadas("saude")` | Procura camadas por palavra-chave |
-| `gs_baixar_camada("...ubs...")` | Baixa uma camada inteira |
-| `gs_baixar_servicos("saude")` | Baixa todas as camadas de um tema |
-| `gs_baixar_todos_equipamentos()` | Baixa tudo! (o grande garimpo) |
-| `gs_metadados("UBS")` | Procura registros de metadados |
-| `gs_metadado_registro(uuid)` | Mostra o "RG" completo de uma camada |
-
----
-
-## 5. Passo a passo para você usar 🚀
-
-### Antes de começar
-
-Rode o R a partir da pasta do projeto e carregue as funções:
+Uma coordenada deve ser escrita sempre nesta ordem:
 
 ```r
-# Carrega todas as funções do projeto
-lapply(list.files("R", full.names = TRUE, pattern = "\\.R$"), source)
+c(latitude, longitude)
+
+# Exemplo em São Paulo
+c(-23.55364, -46.58018)
 ```
 
-### Exemplo 1: ver o que existe
+### Como os dados chegam até você?
 
-```r
-# Todas as camadas de equipamentos e seus temas
-gs_catalogo_equipamentos()
+O projeto usa a porta pública WFS do GeoSampa para buscar dados vetoriais. Ela
+entrega o conteúdo da camada, não apenas uma imagem do mapa.
+
+```text
+GeoSampa (WFS) -> data/ (GeoJSON + CSV) -> busca de proximidade
+-> mapa, análises e relatórios -> saidas/
 ```
 
-### Exemplo 2: baixar um tema (saúde, por exemplo)
+O `GeoJSON` é especialmente útil em programas de mapa. O `CSV` é uma tabela que
+pode ser aberta numa planilha; nas camadas de pontos, ele também é o arquivo
+usado pela busca de proximidade.
 
-```r
-gs_baixar_servicos("saude")
-```
+## Missão 1: preparar a mochila
 
-Os arquivos caem em `data/`:
+### O que você precisa
 
-- `data/equipamento_saude_ubs_posto_centro.geojson` (o mapa)
-- `data/equipamento_saude_ubs_posto_centro.csv` (a tabela)
+1. R 4.6.1.
+2. Internet na primeira preparação e quando for consultar serviços externos.
+3. No Linux, bibliotecas para dados espaciais: GDAL, GEOS, PROJ, UDUNITS e
+   libxml2. Consulte a documentação da sua distribuição Linux para instalá-las.
+4. A pasta do projeto baixada ou clonada em seu computador.
 
-### Exemplo 3: baixar UMA camada específica
+O projeto usa `renv`: ele é como uma mochila que contém as versões corretas dos
+pacotes R. Prefira sempre esse caminho ao instalar pacotes manualmente.
 
-```r
-gs_baixar_camada("equipamento_cultura_bibliotecas")
-```
+### Preparação inicial
 
-### Exemplo 4: baixar TUDO de uma vez
-
-```r
-gs_baixar_todos_equipamentos()
-```
-
-Ou, direto pelo terminal:
+Abra um terminal dentro da pasta principal do projeto e execute:
 
 ```bash
-Rscript scripts/baixar_tudo.R            # tudo
-Rscript scripts/baixar_tudo.R saude      # só saúde
-Rscript scripts/baixar_tudo.R educacao esporte   # educação e esporte
+Rscript scripts/configurar_ambiente.R
 ```
 
-### Exemplo 5: consultar metadados
+O comando lê `renv.lock`, instala `renv` se necessário e restaura os pacotes.
+Quando terminar, reinicie o R ou o RStudio.
 
-```r
-reg <- gs_metadados("UBS")
-reg$uuid            # a "impressão digital" do registro
-gs_metadado_registro(reg$uuid[1])   # o RG completo (título, resumo, órgão)
-```
-
-### Exemplo 6: abrir os dados baixados
-
-```r
-ubs <- sf::st_read("data/equipamento_saude_ubs_posto_centro.geojson")
-
-# ... ou em forma de tabela (CSV), com latitude/longitude prontas:
-tab <- readr::read_csv("data/equipamento_saude_ubs_posto_centro.csv")
-head(tab[, c("nm_equipamento", "nm_bairro_equipamento", "latitude", "longitude")])
-```
-
-> 💡 **Dica de bairro**: quer filtrar UBS por tipo? Use o filtro do WFS:
-> ```r
-> gs_baixar_camada("equipamento_saude_ubs_posto_centro",
->                  filtro = "nm_tipo_equipamento LIKE '%Centro%'")
-> ```
-
----
-
-## 6. O que já está no baú 📦
-
-Rodamos o sistema e o baú ficou assim (em `data/`):
-
-| Tema | Camadas | Alguns exemplos |
-|------|---------|-----------------|
-| 🏥 Saúde | 12 | UBS, hospitais, urgência/emergência, saúde mental, DST/AIDS |
-| 🏫 Educação | 7 | CEU, ensino fundamental/médio, educação infantil, ensino técnico |
-| 🎭 Cultura | 5 | Bibliotecas, museus, teatros/cinema, espaços culturais |
-| ⚽ Esporte | 5 | Centros esportivos, clubes, clubes da comunidade, estádios |
-| 🤝 Assistência social | + | CRAS, conselhos tutelares, Bom Prato, casa mediação |
-| 🍅 Serviços urbanos | + | Feiras livres, mercados, sacolões, wi-fi livre, shoppings |
-| 🛡️ Segurança | + | Polícia civil, polícia militar, bombeiros, guarda civil |
-| 🌳 Espaços verdes | + | Praças e largos, parques |
-
-**Números reais do último garimpo:**
-- ✅ **48 camadas** baixadas com sucesso
-- 📊 **18.608 equipamentos** catalogados
-- 💾 **~54 MB** de dados (48 GeoJSON + 48 CSV)
-
-> 💡 Nem toda camada chamada de "equipamento" pelo sistema é um ponto de serviço
-> no sentido clássico (por exemplo, há camadas de abrangência/cobertura e de
-> coordenação regional). Confira o `tema` e o `titulo` no catálogo
-> (`gs_catalogo_equipamentos()`) para escolher as que interessam.
-
----
-
-## 7. Como o download funciona por dentro 🔧
-
-Quando você pede para baixar uma camada, o robô:
-
-1. **Conta** quantos registros existem (uma consulta rápida).
-2. **Busca em páginas** de 1.000 registros (para ser gentil com o servidor).
-   - ⚠️ Se uma camada não tem chave primária, o GeoServer reclama de paginação.
-     Nosso código detecta isso e ordena por um atributo estável (por exemplo,
-     `cd_identificador`) — e se ainda assim não der, busca tudo de uma vez.
-3. **Junta** todas as páginas num único GeoJSON (na projeção oficial EPSG:31983).
-4. **Converte** para CSV adicionando `latitude` e `longitude` em graus (EPSG:4326).
-
-Detalhe importante: o WFS devolve um campo `numberMatched` dizendo quantos
-registros existem — é assim que o robô sabe quando parar de buscar.
-
----
-
-## 8. Respeito e boas práticas 🤝
-
-- Os dados do GeoSampa são **abertos** (o portal usa licença de dados abertos),
-  mas é sempre bom citar a fonte: **Prefeitura de São Paulo / Geoinfo (SMUL)**.
-- Consulte o **metadado** da camada antes de usá-la em análises sérias — ele
-  informa escala, atualização e órgão responsável.
-- Não faça download em rajada: nosso sistema já pausa entre páginas. Se for
-  baixar muitas camadas de uma vez, dê um tempo entre execuções.
-
----
-
-## 9. Fontes oficiais 📚
-
-| O quê | Onde |
-|-------|------|
-| Tutorial do GeoSampa | https://geoinfo-smdu.github.io/tutorial-GeoSampa/ |
-| Portal GeoSampa | https://geosampa.prefeitura.sp.gov.br |
-| Catálogo de Metadados | https://metadados.geosampa.prefeitura.sp.gov.br |
-| Serviço WFS (camadas) | https://wfs.geosampa.prefeitura.sp.gov.br/geoserver/geoportal/wfs |
-| Serviço WMS (imagens) | https://wms.geosampa.prefeitura.sp.gov.br/geoserver/geoportal/wms |
-| Projeção oficial | SIRGAS2000 / UTM 23S — EPSG:31983 |
-
----
-
-## 10. Bônus: o módulo de CEP, serviços próximos, mapas e análises 🌟
-
-> Imagine que você está em pé numa esquina de São Paulo, segurando um **radar
-> mágico**. Você digita um CEP e o radar responde: *"este endereço é aqui"*,
-> *"a coordenada que me deram bate? sim!"* e *"olha, tem 12 serviços num raio
-> de 2 km — o mais perto é uma UBS a 36 metros!"* — e ainda desenha o mapa e
-> diz se os serviços estão "grudadinhos" ou espalhados. É exatamente isso que
-> este módulo faz. 🧭📡
-
-### 10.1 A missão: quatro perguntas e uma resposta
-
-O módulo responde a quatro perguntas clássicas de quem mora (ou trabalha) na
-cidade:
-
-| Pergunta | Função |
-|----------|--------|
-| "Este CEP é válido? Qual o endereço?" | `gs_ler_cep()` |
-| "Onde fica este CEP no mapa?" | `gs_cep_para_coordenadas()` |
-| "Esta coordenada que me deram confere com o CEP?" | `gs_verificar_cep()` |
-| "O que tem por perto? Como está distribuído?" | `gs_servicos_proximos()`, `gs_mapa_servicos()`, `gs_analise_servicos()` |
-
-Antes de apertar os botões, vamos entender as peças do brinquedo. 🧩
-
-### 10.2 Os conceitos, do jeito simples 🎓
-
-**CEP — o "CPF" do endereço.** O CEP (Código de Endereçamento Postal) é um
-número de 8 dígitos que identifica um endereço ou uma faixa de endereços. Na
-nossa caixa de ferramentas, ele vira a "chave" para procurar coisas no mapa.
-Um CEP não é um ponto exato: pode representar uma rua inteira. Por isso
-falamos em "coordenada de referência".
-
-**Geocodificação — traduzir endereço em coordenada.** É o ato de transformar
-"Rua Serra de Jairé, 340" em um par de números: latitude e longitude. Nosso
-sistema faz isso em **cascata**: primeiro consulta o índice local (offline,
-instantâneo), depois a internet (viaCEP para o endereço e Nominatim/OSM para
-a coordenada). Se o CEP não está no índice local, o sistema usa o **endereço
-do viaCEP** para pedir a **rua** ao Nominatim — e, em último caso, o
-**centróide da cidade**. A primeira fonte que responder, vence. 🏆
-
-**Latitude e longitude — a teia de aranha da Terra.** Imagine uma teia de
-aranha envolvendo o planeta:
-- **Latitude** diz o quanto você está **ao norte ou ao sul** da linha do
-  Equador (varia de -90 a +90; São Paulo fica em ~-23,5°, negativo = sul).
-- **Longitude** diz o quanto você está **a leste ou a oeste** do meridiano de
-  Greenwich (varia de -180 a +180; São Paulo fica em ~-46,6°, negativo = oeste).
-
-**Distância — linha reta ou rua de verdade?** Existem vários jeitos de medir
-"quão longe" está um serviço. São os **tipos de distância** do módulo (tabela
-na seção 10.5). Alguns medem em linha reta (ignorando prédios e ruas), outros
-tentam imitar o caminho real.
-
-**Raio (buffer) — o círculo mágico.** Ao redor do ponto de interesse, você
-traça um círculo de raio X metros. Tudo o que cair dentro do círculo é
-considerado "próximo". O módulo usa essa ideia em `gs_servicos_proximos()` e
-desenha o círculo nos mapas. 🔵
-
-**Mapa estático vs interativo.** O mapa **estático** (ggplot2) vira uma
-imagem PNG/PDF — ótimo para relatórios. O mapa **interativo** (leaflet) vira
-um arquivo HTML que abre no navegador com zoom, arrastar e "bolhinhas"
-(popups) com os detalhes de cada serviço. 🖱️
-
-**Análise espacial — a ciência do "onde".** Além de listar serviços, o módulo
-responde perguntas de estatística espacial: *"quantos serviços tem em cada
-raio?"*, *"qual é o mais próximo?"*, *"quais as áreas de influência?"*
-(Voronoi), *"tem zonas de concentração?"* (KDE) e *"os serviços se agrupam
-mais do que o acaso?"* (Moran's I). Tudo com funções que devolvem tabelas,
-polígonos e gráficos prontos. 📊
-
-### 10.3 Preparando o ambiente 🎒
-
-Só na primeira vez:
-
-```r
-install.packages(c("httr", "jsonlite", "sf", "readr", "xml2"))
-```
-
-Opcionais (o módulo avisa se faltarem):
-
-```r
-install.packages(c("ggplot2", "leaflet", "htmlwidgets"))  # mapas
-install.packages(c("spdep"))                              # Moran's I, LISA, Getis-Ord
-install.packages(c("osrm"))                               # rede viária
-install.packages(c("spatstat"))                           # função K de Ripley
-install.packages(c("htmltools", "base64enc"))             # relatório HTML
-install.packages(c("testthat"))                           # testes automatizados
-```
-
-E carregue as funções:
+No console do R, carregue o kit:
 
 ```r
 source("scripts/carregar_funcoes.R")
 ```
 
-### 10.4 Missão 1 — Ler e validar um CEP 📮
+O carregador confirma a presença dos pacotes básicos e disponibiliza as funções
+da pasta `R/`. O projeto não muda a pasta de trabalho atual do R. Por isso,
+comece na raiz do repositório ou use caminhos completos ao salvar arquivos.
+
+### Terminal e console do R não são o mesmo lugar
+
+- Use o **terminal** para comandos que começam com `Rscript`.
+- Use o **console do R/RStudio** para linhas que começam com funções, como
+  `gs_baixar_camada()`.
+
+| Lugar | Exemplo |
+|---|---|
+| Terminal | `Rscript scripts/configurar_ambiente.R` |
+| Console do R | `source("scripts/carregar_funcoes.R")` |
+
+## Missão 2: abrir o baú de dados
+
+Em uma clonagem nova, a pasta `data/` não vem preenchida. Os dados baixados são
+grandes e atualizáveis, por isso não são enviados pelo Git junto com o código.
+
+### Ver o catálogo
+
+```r
+gs_catalogo_equipamentos()
+```
+
+Essa função pede ao GeoSampa a lista de camadas de equipamentos e mostra nomes,
+temas e descrições. Para procurar por uma palavra:
+
+```r
+gs_buscar_camadas("saude")
+gs_buscar_camadas("feira")
+```
+
+### Baixar uma camada
+
+Vamos baixar UBS como primeira folha do mapa:
+
+```r
+gs_baixar_camada("equipamento_saude_ubs_posto_centro")
+```
+
+Depois, confira os tesouros que chegaram:
+
+```r
+list.files("data", pattern = "ubs_posto_centro")
+```
+
+O download cria, normalmente:
+
+```text
+data/
+├── equipamento_saude_ubs_posto_centro.geojson
+└── equipamento_saude_ubs_posto_centro.csv
+```
+
+O projeto baixa páginas de dados, confere a integridade e só promove os arquivos
+quando o conjunto está pronto. Evite interromper a internet durante o processo.
+Se restar um diretório `.gs-lock`, uma execução anterior pode ter sido
+interrompida: confira os arquivos antes de apagar qualquer coisa.
+
+### Baixar por assunto ou tudo de uma vez
+
+```r
+# Todas as camadas que combinam com o tema
+gs_baixar_servicos("saude")
+
+# Uma camada específica
+gs_baixar_camada("equipamento_feira_livre")
+
+# Todo o catálogo de equipamentos: pode demorar e ocupar espaço
+gs_baixar_todos_equipamentos()
+```
+
+No terminal, você também pode baixar:
+
+```bash
+Rscript scripts/baixar_tudo.R saude
+Rscript scripts/baixar_tudo.R --camada equipamento_saude_ubs_posto_centro
+```
+
+### Usar filtros com cuidado
+
+`filtro` aceita uma expressão CQL enviada ao GeoSampa. É uma ferramenta útil,
+mas avançada: os nomes das colunas mudam entre camadas. Consulte o esquema da
+camada antes de filtrar e teste um download pequeno.
+
+```r
+gs_baixar_camada(
+  "equipamento_bombeiros",
+  filtro = "cd_identificador = 150001"
+)
+```
+
+Arquivos obtidos com filtro recebem um sufixo no nome para não confundir esse
+recorte com a camada completa.
+
+### Ler os dados
+
+```r
+# Tabela: boa para planilhas e para olhar colunas
+ubs_tabela <- readr::read_csv("data/equipamento_saude_ubs_posto_centro.csv")
+
+# Mapa: bom para programas GIS e operações espaciais
+ubs_mapa <- sf::st_read("data/equipamento_saude_ubs_posto_centro.geojson")
+```
+
+Os CSVs de pontos recebem `latitude` e `longitude` em graus. Arquivos de áreas,
+como distritos, podem ter `geometria_wkt` em vez dessas colunas e não participam
+da busca de serviços próximos.
+
+### Ver apenas o que o radar pode usar
+
+```r
+gs_listar_servicos()
+gs_listar_servicos("saude")
+```
+
+Essa é a lista mais segura para preencher o argumento `camadas`, pois considera
+o que já foi baixado localmente e possui coordenadas aproveitáveis.
+
+## Missão 3: encontrar o ponto de partida
+
+### Ler um CEP
 
 ```r
 gs_ler_cep("03175-001")
 ```
 
-```
-        cep         logradouro        bairro    cidade uf    ibge
-1 03175-001 Rua Serra de Jairé Quarta Parada São Paulo SP 3550308
-```
+O projeto remove traços e espaços, mas recomenda-se usar oito dígitos, com ou
+sem hífen. Essa função consulta o ViaCEP pela internet e devolve informações do
+endereço quando o CEP existe.
 
-O que aconteceu? O **viaCEP** (serviço público dos Correios, sem chave de
-acesso) validou o CEP e devolveu endereço, bairro, cidade, UF e código IBGE.
-Se o CEP não existir, você recebe um aviso claro. Os CEPs devem ter **8
-dígitos** — aceitamos com ou sem hífen (`"03175-001"` ou `"03175001"`).
+> 💡 ViaCEP é um serviço independente de consulta de CEPs; não é uma API dos
+> Correios.
 
-### 10.5 Missão 2 — Transformar CEP em coordenada 📍
+### Transformar CEP em coordenada
 
 ```r
 gs_cep_para_coordenadas("03175-001")
 ```
 
-```
-        cep  latitude longitude fonte                        precisao
-1 03175-001 -23.55334 -46.58032 local  coordenada mediana do índice local ...
-```
+O explorador tenta encontrar uma referência nesta ordem:
 
-Como funciona por dentro (a **cascata**):
+1. 🗃️ Índice local montado a partir dos CSVs já baixados.
+2. 🌐 Busca no Nominatim / OpenStreetMap pelo código postal ou endereço.
+3. 🌐 Busca pela cidade no Nominatim, quando a rua não for localizada.
 
-1. **Índice local** (`gs_indice_cep()`): varre os `data/*.csv` e guarda todas
-   as ocorrências CEP → coordenada (hoje: **7.148 CEPs** e **11.131
-   registros**). Se um CEP tem vários endereços, a coordenada "representante"
-   é a **mediana** deles.
-2. **viaCEP + Nominatim**: se o CEP não está no índice, o sistema consulta a
-   internet (com pausa de 1 segundo entre chamadas, respeitando a política do
-   OSM). O Nominatim tenta primeiro pelo **código postal**; se não achar (muito
-   comum no Brasil, onde o OSM raramente tem `postal_code` por rua), o sistema
-   usa o endereço do **viaCEP** e pede a **rua** (`street + city + state`); se
-   ainda assim não achar, cai para o **centróide da cidade**. A coluna `fonte`
-   mostra qual caminho venceu (`local` ou `nominatim`) e a coluna `precisao`
-   indica o nível: código postal, rua ou cidade.
+Quando um CEP está no índice local, a consulta pode funcionar sem internet. Fora
+dele, é preciso que ViaCEP e Nominatim estejam disponíveis. Observe as colunas
+`fonte` e `precisao`: uma referência de rua ou cidade não deve ser tratada como
+localização exata.
+`fonte` e `precisao`: uma referência de rua ou cidade não deve ser tratada como
+localização exata.
 
-Você também pode construir/atualizar o índice manualmente:
+Para reconstruir o índice depois de baixar novas camadas:
 
 ```r
-indice <- gs_indice_cep(force = TRUE)   # reconstrói do zero
-nrow(indice)                            # 11131
-refs <- gs_cep_referencia()             # coordenada mediana por CEP
+indice <- gs_indice_cep(force = TRUE)
+referencias <- gs_cep_referencia(indice)
 ```
 
-### 10.6 Missão 3 — A coordenada bate com o CEP? ✅
+### Conferir uma coordenada contra um CEP
 
 ```r
-gs_verificar_cep("03175-001", -23.553640, -46.580180)
+gs_verificar_cep(
+  cep = "03175-001",
+  latitude = -23.55364,
+  longitude = -46.58018,
+  tolerancia_m = 300
+)
 ```
 
-```
-$cep                    : chr "03175-001"
-$latitude_cep           : num -23.6
-$longitude_cep          : num -46.6
-$distancia_m            : num 0
-$confere                : logi TRUE
-$veredito               : chr "CONFERE"
-$tolerancia_m           : num 300
-$n_ocorrencias          : int 2
-$equipamento_referencia : chr "AMA/UBS ÁGUA RASA - DR. MARCOS ANDRADE CORSATO"
-$camada_referencia      : chr "equipamento_saude_ubs_posto_centro"
-```
+O resultado traz a distância até a referência disponível e um veredito. Quando
+a fonte é vaga, como uma rua ou cidade, o retorno correto é `SEM DADO
+SUFICIENTE`, e não uma confirmação artificial.
 
-O veredito compara a coordenada informada com a de referência do CEP: se a
-distância for menor que a **tolerância** (padrão **300 m**, configurável),
-diz `CONFERE`; senão, `NAO CONFERE`. É o nosso "detector de mentiras" do
-mapa. 🕵️
+## Missão 4: ligar o radar
 
-### 10.7 Missão 4 — O que tem por perto? 📡
+Agora vamos perguntar: “o que existe perto deste ponto?”
+
+### Busca por coordenadas
 
 ```r
 proximos <- gs_servicos_proximos(
-  cep     = "03175-001",
-  raio_m  = 2000,
-  camadas = c("equipamento_saude_ubs_posto_centro", "equipamento_educacao_ceu")
+  coordenadas = c(-23.55364, -46.58018),
+  camadas = "equipamento_saude_ubs_posto_centro",
+  raio_m = 2000
 )
-head(proximos[, c("camada", "nome", "distancia_m")])
+
+proximos[, c("nome", "tipo_servico", "bairro", "distancia_m")]
 ```
 
-```
-  camada                                   nome            distancia_m
-1 equipamento_saude_ubs_posto_centro       AMA/UBS ÁGUA RASA...   36.6
-2 equipamento_saude_ubs_posto_centro       UBS ...                 1801
-```
-
-Dica: se você **não** informar `camadas`, ele usa **todas** as camadas locais:
+### Busca por CEP
 
 ```r
-gs_servicos_proximos(cep = "03175-001", raio_m = 1000)
+proximos <- gs_servicos_proximos(
+  cep = "03175-001",
+  camadas = "saude",
+  raio_m = 3000
+)
 ```
 
-```
-  camada                                nome                      distancia_m
-1 equipamento_assistencia_social        CENTRO SOCIAL COMUNIT...     243.
-2 equipamento_educacao_infantil_rede_publica  CR P CONV JOSE PE      239.
-...
-```
+Informe **exatamente um** entre `cep` e `coordenadas`. Usar os dois ao mesmo
+tempo, ou nenhum, deixa o explorador sem ponto de partida.
 
-Outros botões úteis:
+### Escolher camadas
+
+`camadas` aceita várias formas de indicar o que você procura:
 
 ```r
-# Usar coordenadas em vez de CEP
-gs_servicos_proximos(coordenadas = c(-23.55334, -46.58032), raio_m = 1500)
-
-# Limitar a N resultados por camada
-gs_servicos_proximos(cep = "03175-001", raio_m = 5000, n_por_camada = 3)
-
-# Trocar a métrica de distância
-gs_servicos_proximos(cep = "03175-001", raio_m = 2000, tipo_distancia = "manhattan")
+"saude"                                     # tema
+"equipamento_saude_ubs_posto_centro"        # nome exato
+"ubs"                                       # trecho do nome
+c("saude", "equipamento_feira_livre")     # mais de uma escolha
 ```
 
-> 🎯 **Em `camadas` você pode passar:**
-> - o **tema** inteiro — `"saude"` expande para todas as camadas de saúde
->   (UBS, ambulatórios, saúde mental, urgência/emergência etc.);
-> - o **nome completo** da camada — `"equipamento_saude_ubs_posto_centro"`;
-> - um **pedaço do nome** — `"ubs"` casa com todas as camadas que contêm "ubs";
-> - um **`data.frame`** vindo de `gs_catalogo_equipamentos()` (usa a coluna
->   `camada`).
-> Para ver todas as opções locais agrupadas por tema, use `gs_listar_servicos()`
-> (ou `gs_listar_servicos("saude")` para filtrar). Se um valor não bater com
-> nada, o sistema avisa e sugere a listagem.
+Se `camadas` for omitido, o projeto tenta usar todas as camadas locais válidas.
+Comece com uma camada ou tema pequeno: será mais fácil entender a tabela e o
+mapa gerados.
 
-### 10.8 Missão 5 — Os tipos de distância 📏
+### Limitar resultados por camada
 
-Nem toda distância é igual. A função `gs_tipos_distancia()` é o "manual de
-instruções" embutido:
+```r
+proximos <- gs_servicos_proximos(
+  cep = "03175-001",
+  camadas = "saude",
+  raio_m = 5000,
+  n_por_camada = 3
+)
+```
+
+Isso guarda, no máximo, os três mais próximos de cada camada. É ótimo para uma
+lista curta, mas significa que você não está olhando todos os serviços do raio.
+Algumas análises são bloqueadas para evitar conclusões enganosas quando houve
+omissão de ocorrências.
+
+### O que vem na tabela?
+
+| Coluna | Significado |
+|---|---|
+| `nome` | Nome do equipamento, quando disponível. |
+| `tipo_servico` | Categoria declarada pela camada. |
+| `endereco` e `bairro` | Informações de localização, quando disponíveis. |
+| `camada` | A folha do GeoSampa de onde veio o registro. |
+| `distancia_m` | Distância arredondada para leitura. |
+| `distancia_m_exata` | Valor usado nos filtros e cálculos. |
+
+## Missão 5: escolher a régua
+
+Distância pode significar coisas diferentes. Chame `gs_tipos_distancia()` para
+ver a cola rápida construída pelo próprio projeto.
 
 ```r
 gs_tipos_distancia()
 ```
 
-| Tipo | O que mede | Quando usar |
-|------|-----------|-------------|
-| `geodesica` (padrão) | Elipsoidal via `sf::st_distance` em CRS geográfico | Referência, mais precisa |
-| `euclidiana` | Metros na projeção UTM/SIRGAS2000 (EPSG:31983) | Rápida, boa até ~20 km |
-| `haversine` | Aproximação esférica sobre WGS84 | Leve, sem transformar CRS |
-| `manhattan` | \|Δx\| + \|Δy\| em metros projetados | "Caminhabilidade" em quadrículas |
-| `rede_viaria` | Rota real de carro via OSRM | Requer `osrm` (opcional) |
+| Tipo | Ideia simples | Quando usar |
+|---|---|---|
+| `geodesica` | Linha reta sobre a superfície da Terra. É o padrão. | Comparações reproduzíveis em geral. |
+| `euclidiana` | Linha reta medida em metros na projeção de São Paulo. | Cálculos rápidos em distâncias locais. |
+| `haversine` | Outra aproximação de linha reta usando latitude/longitude. | Cenários leves sem conversão de projeção. |
+| `manhattan` | Soma os deslocamentos norte-sul e leste-oeste. | Simular uma grade geométrica; não é rota real. |
+| `rede_viaria` | Percurso de carro calculado pelo OSRM. | Quando a rota por ruas é mais importante que a linha reta. |
 
-**Na prática:** as três primeiras são variações de "linha reta" — a
-**geodésica** é a mais fiel à curvatura da Terra; a **euclidiana** é a mais
-rápida em metros; a **haversine** é uma aproximação esférica leve. A
-**manhattan** soma os deslocamentos leste-oeste e norte-sul (imagine andar
-por quarteirões retos, como numa grade). A **rede viária** usa o grafo real
-de ruas: é a mais próxima do tempo real de caminhada/viagem, mas depende do
-pacote `osrm` e de um servidor com cobertura.
-
-### 10.9 Missão 6 — Desenhar os mapas 🗺️
-
-Um comando, dois mundos:
+Exemplo:
 
 ```r
-# Mapa interativo (HTML) — abre no navegador, dá zoom, mostra popups
-gs_mapa_servicos(proximos, interativo = TRUE,  salvar = "mapas/cep_03175001.html")
-
-# Mapa estático (PNG) — para colar em relatório
-gs_mapa_servicos(proximos, interativo = FALSE, salvar = "mapas/cep_03175001.png")
+proximos <- gs_servicos_proximos(
+  coordenadas = c(-23.55364, -46.58018),
+  camadas = "saude",
+  raio_m = 3000,
+  tipo_distancia = "euclidiana"
+)
 ```
 
-O mapa mostra: o **ponto de interesse** (marcador vermelho), o **círculo do
-raio** (contorno azul tracejado) e os **serviços** coloridos por tipo. No mapa
-interativo, cada serviço mostra um **tooltip ao passar o mouse** (nome, tipo e
-distância) e um **popup ao clicar** com nome, endereço, bairro, distância e
-camada; há também escala, seletor de camadas e três basemaps (OSM, CartoDB e
-satélite). O mapa estático sai com **legenda no rodapé em várias colunas** (o
-número de colunas se ajusta à quantidade de tipos, e rótulos longos são
-quebrados para caber) e **resolução configurável** (`largura`/`altura`/`dpi`;
-largura padrão 12 polegadas a 300 dpi, com a altura ajustada automaticamente
-para a legenda não ser cortada). Se você passar `cep`/`camadas` direto, ele
-calcula tudo sozinho:
+`rede_viaria` exige o pacote `osrm` e um servidor OSRM disponível. O perfil
+padrão é `driving` (carro), não caminhada. A seleção por rede não cria uma
+isócrona; por isso análises que dependem de uma área circular completa não são
+executadas para esse resultado.
+
+## Missão 6: desenhar a descoberta
+
+Depois de obter `proximos`, você pode criar dois tipos de mapa.
+
+### Mapa estático: uma imagem para relatório
 
 ```r
-gs_mapa_servicos(cep = "03175-001",
-                 camadas = "equipamento_saude_ubs_posto_centro",
-                 raio_m = 1500, interativo = FALSE,
-                 salvar = "mapas/ubs_agua_rasa.png")
+gs_mapa_servicos(
+  proximos,
+  interativo = FALSE,
+  salvar = "mapas/ubs_perto_de_mim.png"
+)
 ```
 
-### 10.10 Missão 7 — Análises estatísticas e espaciais 📊
+O PNG mostra o ponto de partida, o círculo do raio e os serviços coloridos por
+tipo. Você pode controlar `largura`, `altura` e `dpi` quando precisar de uma
+imagem maior.
 
-Uma função, várias análises — escolha com o argumento `tipo` (aceita vários):
+### Mapa interativo: para explorar no navegador
+
+```r
+gs_mapa_servicos(
+  proximos,
+  interativo = TRUE,
+  salvar = "mapas/ubs_perto_de_mim.html"
+)
+```
+
+Abra o arquivo HTML no navegador. Você poderá aproximar, afastar e clicar nos
+pontos para ver detalhes. Os mapas de fundo vêm de serviços externos e precisam
+de internet ao serem visualizados.
+
+Também é possível pedir busca e mapa de uma vez:
+
+```r
+gs_mapa_servicos(
+  cep = "03175-001",
+  camadas = "saude",
+  raio_m = 1500,
+  interativo = FALSE,
+  salvar = "mapas/saude_no_cep.png"
+)
+```
+
+## Missão 7: fazer perguntas aos dados
+
+`gs_analise_servicos()` recebe o resultado do radar e devolve uma lista com as
+respostas. Comece pelas análises simples:
 
 ```r
 analises <- gs_analise_servicos(
   proximos,
-  tipo = c("descritivas", "vizinho_mais_proximo",
-           "voronoi", "kde", "raios_progressivos", "moran", "rede_viaria")
+  tipo = c("descritivas", "vizinho_mais_proximo", "raio_otimo")
+)
+
+analises$descritivas
+analises$vizinho_mais_proximo
+```
+
+> 🔎 Uma análise ser produzida não torna automaticamente sua conclusão certa.
+> Leia os limites metodológicos antes de usar resultados para decisões públicas,
+> comparação de bairros ou divulgação científica.
+
+### Nível 1: perguntas do dia a dia
+
+| Tipo | Pergunta que ajuda a responder |
+|---|---|
+| `descritivas` | Quantos serviços foram encontrados e como as distâncias se distribuem? |
+| `vizinho_mais_proximo` | Qual é o serviço mais perto, no total e por camada? |
+| `acessibilidade_media` | Como resumir as distâncias sem depender só da média? |
+| `raio_otimo` | Qual raio alcança 50%, 75%, 90% ou 95% dos serviços observados? |
+| `raios_progressivos` | Quantos serviços aparecem a cada distância crescente? |
+| `cobertura_buffer` | Que parte da área de busca fica coberta por buffers dos serviços? |
+
+`raios_progressivos` usa, por padrão, 500 m, 1.000 m e 2.000 m. Escolha um
+raio de consulta de ao menos 2.000 m se quiser essa análise.
+
+### Nível 2: enxergar a distribuição no mapa
+
+| Tipo | Pergunta que ajuda a responder |
+|---|---|
+| `nni` | Os pontos parecem agrupados, aleatórios ou dispersos? |
+| `voronoi` | Qual região está mais perto de cada serviço? |
+| `kde` | Onde há maior concentração de pontos? |
+| `kde_banda` | Como fica a densidade com largura de banda estimada? |
+| `por_distrito` | Quantos serviços e qual densidade aparecem em cada parte distrital observada? |
+| `cobertura_populacional` | Qual população estimada está dentro da área de busca? |
+
+`cobertura_populacional` precisa de `densidade_km2` ou de uma camada `sf` de
+polígonos com uma coluna chamada `populacao`. Sem isso, a pergunta não tem dados
+suficientes para ser respondida.
+
+### Nível 3: investigação espacial avançada
+
+| Tipo | O que investiga | Necessidade adicional |
+|---|---|---|
+| `moran` | Associação espacial da densidade na grade. | `spdep` |
+| `getis_ord` | Áreas quentes e frias na grade. | `spdep` |
+| `lisa` | Agrupamentos locais alto-alto, baixo-baixo e mistos. | `spdep` |
+| `moran_distrital` | Associação espacial da densidade por distrito. | `spdep` |
+| `ripley_k` | Agrupamento em diferentes escalas de distância. | `spatstat.geom` e `spatstat.explore` |
+| `rede_viaria` | Diferença entre rota de carro e linha reta. | `osrm` e servidor OSRM |
+
+Essas análises podem retornar uma mensagem em vez de um número quando faltam
+pontos, pacote, dados ou condições adequadas. Isso é uma proteção, não um erro
+silencioso.
+
+### Dependências opcionais
+
+O `renv` restaura as dependências registradas pelo projeto. Se uma análise ainda
+avisar que um pacote opcional está ausente, instale somente o pacote indicado e
+registre-o no ambiente conforme a política do seu projeto. As análises básicas,
+todavia, também dependem do ambiente espacial e gráfico restaurado pelo `renv`.
+
+## Missão 8: guardar as descobertas
+
+O comando abaixo salva a expedição em uma pasta organizada:
+
+```r
+gs_salvar_analises(
+  proximos,
+  analises,
+  dir = "saidas/minha_primeira_expedicao",
+  formato_relatorio = "ambos"
 )
 ```
 
-| Tipo | O que devolve | Dependência |
-|------|---------------|-------------|
-| `descritivas` | Contagens por tipo/camada, resumo, histograma e boxplot anotados (mediana/média) | nenhuma |
-| `vizinho_mais_proximo` | Distância ao serviço mais próximo (geral e por camada) | nenhuma |
-| `acessibilidade_media` | Resumo robusto das distâncias (mediana, P25/P75, IQR, CV) + curva ECDF | nenhuma |
-| `raio_otimo` | Raio que alcança 50%, 75%, 90% e 95% dos serviços + gráfico ECDF | nenhuma |
-| `cobertura_buffer` | Área coberta por buffers (por camada e geral) vs casco convexo | nenhuma |
-| `nni` | Índice de Vizinho Mais Próximo (padrão agrupado/aleatório/disperso) | nenhuma |
-| `voronoi` | Polígonos de Thiessen: áreas de influência de cada serviço (sf) | nenhuma |
-| `kde` | Mapa de densidade de kernel (concentração) | nenhuma |
-| `kde_banda` | KDE com largura de banda estimada (Silverman) | nenhuma |
-| `raios_progressivos` | Oportunidades acumuladas por raio (tabela + curva) | nenhuma |
-| `getis_ord` | Getis-Ord G* local em grade hexagonal (pontos quentes/frios) | `spdep` (opcional) |
-| `lisa` | Moran local (LISA) em grade hexagonal (alto-alto/baixo-baixo) | `spdep` (opcional) |
-| `ripley_k` | Função K de Ripley (agregação em múltiplas escalas) | `spatstat` (opcional) |
-| `moran` | Moran's I sobre contagens em grade hexagonal (padrão) | `spdep` (opcional) |
-| `moran_distrital` | Moran's I e LISA agregados por distrito | `spdep` (opcional) |
-| `por_distrito` | Contagem e densidade de serviços por distrito (mapa) | internet (1ª vez) |
-| `cobertura_populacional` | População atendida no raio (via camada de população ou densidade) | opcional |
-| `rede_viaria` | Distância de percurso (OSRM) comparada à linha reta | `osrm` (opcional) |
+`formato_relatorio` aceita `"md"`, `"html"`, `"ambos"` ou `"nenhum"`.
 
-Exemplos de saídas:
-
-```r
-analises$descritivas$resumo_distancia
-#    Min. 1st Qu.  Median    Mean 3rd Qu.    Max.
-#    36.6   477.7   918.8   918.8  1359.9  1801.0
-
-analises$raios_progressivos$contagem        # tabela de oportunidades
-#   raio_m n_servicos
-# 1    500          1
-# 2   1000          1
-# 3   2000          2
-
-analises$raios_progressivos$grafico         # curva de oportunidades acumuladas
-analises$acessibilidade_media$grafico_ecdf  # curva acumulada das distâncias
+```text
+saidas/minha_primeira_expedicao/
+├── servicos_proximos.csv
+├── metadados_consulta.csv
+├── amostragem_por_camada.csv
+├── metricas.csv
+├── interpretacoes.csv
+├── manifesto.csv
+├── relatorio_numerico.md
+├── relatorio_analises.md
+├── relatorio_analises.html
+├── tabelas/
+├── geometrias/
+└── figuras/
 ```
 
-Se um pacote opcional (`spdep` ou `osrm`) não estiver instalado, a análise
-**não quebra**: devolve uma mensagem orientando a instalação.
+| Arquivo | Para que serve |
+|---|---|
+| `servicos_proximos.csv` | Lista de equipamentos usados na análise. |
+| `metadados_consulta.csv` | Raio, métrica de distância e outras escolhas da consulta. |
+| `amostragem_por_camada.csv` | Quantos itens existiam, foram mantidos ou omitidos. |
+| `metricas.csv` | Resultados numéricos normalizados. |
+| `interpretacoes.csv` | Leituras automáticas para ajudar na primeira interpretação. |
+| `manifesto.csv` | Inventário de todos os arquivos criados. |
+| `tabelas/`, `geometrias/`, `figuras/` | Resultados específicos de cada análise. |
 
-**Mas o que cada análise significa, no dia a dia?**
-
-- `descritivas`: responde *"quantos serviços tem e como são as distâncias?"*
-  — histograma e boxplot trazem linhas da mediana e da média.
-- `vizinho_mais_proximo`: responde *"qual é o serviço mais perto?"*
-- `acessibilidade_media`: resume as distâncias com medidas **robustas**
-  (mediana, P25/P75, IQR e coeficiente de variação) — preferíveis à média pura
-  em distribuições assimétricas — e mostra a curva ECDF ("X% dos serviços a até
-  Y m").
-- `raio_otimo`: diz o raio que alcança 50%, 75%, 90% dos serviços, com o
-  gráfico ECDF que permite **ver** o percentil correspondente a cada raio.
-- `cobertura_buffer`: estima qual fração da área estudada fica "coberta" por
-  buffers ao redor dos serviços.
-- `nni` (Índice de Vizinho Mais Próximo): responde *"os serviços se agrupam?"*
-  comparando a distância média real ao vizinho mais próximo com a esperada
-  num padrão aleatório (R < 1 = agrupado; R > 1 = disperso). O resultado traz
-  um aviso sobre efeito de borda.
-- `voronoi`: divide a área em "pedaços de influência" — cada pedaço mostra a
-  região atendida "primeiro" por aquele serviço.
-- `kde` / `kde_banda`: fazem um "mapa de calor" — onde os serviços se amontoam.
-- `raios_progressivos`: mostra quantos serviços você encontra conforme caminha
-  500 m, 1 km, 2 km... — agora também com a curva de oportunidades acumuladas.
-- `getis_ord`: aponta **onde** estão os aglomerados (pontos quentes/frios) em
-  células hexagonais (aviso: p-valores locais sem correção para múltiplos
-  testes — trate como exploratório).
-- `lisa`: identifica células alto-alto (muitos serviços vizinhos com muitos
-  serviços) e baixo-baixo (o oposto); mesmo aviso de múltiplos testes.
-- `ripley_k`: pergunta, em várias escalas, *"os serviços se agrupam mais do que
-  o acaso?"* — útil para escolher o raio de análise.
-- `moran`: pergunta *"os serviços estão mais agrupados do que o acaso?"*. A
-  versão padrão aplica Moran's I às **contagens por célula hexagonal** (a
-  aplicação estatisticamente correta para pontos); a versão sobre a distância
-  radial (argumento `sobre_grade = FALSE`) fica como diagnóstico, com ressalva.
-- `moran_distrital`: o mesmo diagnóstico, mas agregado por distrito — mais
-  estável e interpretável para políticas públicas.
-- `por_distrito`: conta e mapeia os serviços por distrito da cidade.
-- `cobertura_populacional`: estima a população dentro do raio de busca.
-- `rede_viaria`: compara o "voo do pássaro" (linha reta) com o caminho real de
-  carro/pé.
-
-### 10.11 Tabela-resumo das funções do módulo 🧰
-
-| Função | O que faz | Sai |
-|--------|-----------|-----|
-| `gs_indice_cep()` | Monta o índice local CEP → coordenadas | data.frame |
-| `gs_listar_servicos()` | Lista os serviços locais por tema (o que usar em `camadas`) | data.frame |
-| `gs_ler_cep(cep)` | Valida o CEP e devolve o endereço | data.frame |
-| `gs_cep_para_coordenadas(cep)` | Lat/long do CEP (índice local → Nominatim) | data.frame |
-| `gs_verificar_cep(cep, lat, lon)` | Confere se a coordenada bate com o CEP | lista |
-| `gs_servicos_proximos(...)` | Serviços dentro do raio (ou N por camada) | data.frame |
-| `gs_tipos_distancia()` | Manual das métricas de distância | data.frame |
-| `gs_mapa_servicos(...)` | Mapa estático (PNG/PDF) ou interativo (HTML) | plot/HTML |
-| `gs_analise_servicos(...)` | Análises estatísticas/espaciais | lista |
-| `gs_relatorio_analises(...)` | Relatório consolidado (HTML/MD) com as análises | arquivo |
-| `gs_exportar_resultado(...)` | Exporta tabelas e polígonos em CSV/GeoJSON | caminhos |
-
-### 10.12 Relatório e exportação 📦
-
-Um comando gera um **relatório consolidado** com as análises escolhidas:
-tabelas, gráficos e mapas num único arquivo HTML auto-contido (as figuras são
-embutidas em base64 — não depende de pandoc/rmarkdown) ou em Markdown. Cada
-seção traz **tabela + gráfico + um parágrafo de interpretação automática**
-(`gs_interpretar_analise()`) com a leitura dos principais resultados
-(mediana, percentis, R do NNI, Moran, cobertura etc.) — para as análises
-saírem explicadas, não só calculadas.
+Por segurança, uma pasta não vazia não é sobrescrita por padrão. Para trocar
+arquivos existentes conscientemente:
 
 ```r
+gs_salvar_analises(
+  proximos,
+  analises,
+  dir = "saidas/minha_primeira_expedicao",
+  sobrescrever = TRUE
+)
+```
+
+Você também pode usar funções separadas quando precisar de mais controle:
+
+```r
+gs_exportar_resultado(proximos, analises, dir = "saidas/exportacao")
+gs_relatorio_numerico(proximos, analises, arquivo = "saidas/numerico.md")
 gs_relatorio_analises(
-  cep = "03175-001",
-  tipo = c("descritivas", "acessibilidade_media", "raio_otimo", "nni",
-           "voronoi", "getis_ord", "por_distrito"),
-  arquivo = "relatorios/relatorio.html"
+  resultado = proximos,
+  analises = analises,
+  arquivo = "saidas/analises.html"
 )
 ```
 
-E para compartilhar os dados (não só as figuras):
+## Missão 9: explorar vários locais
+
+Uma expedição em lote compara várias origens. Você pode misturar CEPs e
+coordenadas:
 
 ```r
-analises <- gs_analise_servicos(cep = "03175-001", tipo = "descritivas")
-gs_exportar_resultado(proximos, analises, dir = "saidas")
+lote <- gs_analisar_locais(
+  cep = c(casa = "05508-090", trabalho = "03175-001"),
+  coordenadas = data.frame(
+    id = c("parque", "escritorio"),
+    latitude = c(-23.55364, -23.57000),
+    longitude = c(-46.58018, -46.65000)
+  ),
+  camadas = "saude",
+  raio_m = 3000,
+  nome_execucao = "comparacao_saude",
+  formato_relatorio = "ambos"
+)
+
+print(lote)
+lote$origens
+lote$comparacao
 ```
 
-### 10.13 Limitações conhecidas ⚠️
+Cada origem ganha sua própria pasta e a pasta principal reúne as comparações:
 
-- O índice local cobre apenas os CEPs dos equipamentos públicos (≈7 mil) —
-  CEPs fora dele precisam de internet (viaCEP + Nominatim).
-- Um CEP de faixa de rua pode ter várias coordenadas; a verificação usa a
-  ocorrência mais próxima.
-- CEP de caixa postal não tem coordenada útil.
-- O servidor demo do OSRM tem cobertura e limites próprios; configure outro
-  com `options(gs.osrm_server = "http://...")` ou `options(osrm.server = ...)`.
-  O perfil de rota também é configurável (`options(gs.osrm_profile = "driving")`).
-- O código OSRM é compatível com o pacote `osrm` ≥ 4.0 (API de entrada com
-  `lon`/`lat` e distâncias em metros) e com versões antigas (coluna `id` e
-  distâncias em km).
-- `cobertura_populacional` precisa de uma camada de população (ex.: setores
-  censitários do IBGE) ou de uma densidade média estimada.
-- Análises locais (`lisa`, `getis_ord`, `moran`) dependem de vizinhança e
-  número de pontos; resultados com poucos pontos devem ser lidos com cautela.
-- `moran` (sobre grade hexagonal) depende do tamanho da célula
-  (`celula_m`); resultados podem variar com a escolha da grade. A versão
-  sobre a distância radial (`sobre_grade = FALSE`) fica como diagnóstico.
+```text
+saidas/comparacao_saude/
+├── origens.csv
+├── servicos.csv
+├── metricas.csv
+├── comparacao_origens.csv
+├── resultado_lote.rds
+├── relatorio_lote.md
+├── figuras/
+└── origens/
+```
 
----
+O status de uma origem pode ser `ok`, `parcial`, `sem_servicos` ou `erro`.
+`parcial` quer dizer que a busca terminou, mas alguma análise não pôde rodar.
+Por padrão, um problema em uma origem não impede as outras de serem processadas.
 
-## 11. Ideias de próximos passos 🌟
+### Lote pelo terminal
 
-- 🧭 Cruzar os equipamentos com camadas de distritos/subprefeituras para saber
-  **quais regiões têm e quais não têm** determinado serviço.
-- 🗺️ Gerar mapas temáticos com `ggplot2` ou `tmap` a partir dos GeoJSON.
-- 🧮 Calcular distâncias de cada casa ao serviço mais próximo.
-- 🔁 Automatizar o download com agendamento (ex.: `cron`) para manter a base atualizada.
+```bash
+Rscript scripts/analisar_lote.R \
+  --ceps 05508090,03175001 \
+  --coords "-23.55364,-46.58018" \
+  --camadas saude \
+  --raio 3000 \
+  --nome comparacao_saude \
+  --formato md
+```
 
-**Boa garimpagem!** 🗺️✨
+Opções disponíveis:
+
+| Opção | Uso |
+|---|---|
+| `--ceps` | CEPs separados por vírgula. |
+| `--coords` | Pares `latitude,longitude` separados por ponto e vírgula. |
+| `--camadas` | Camadas ou temas separados por vírgula. |
+| `--ids` | Identificadores separados por vírgula, um para cada origem. |
+| `--raio` | Raio em metros. |
+| `--saida` | Pasta que receberá a execução. |
+| `--nome` | Nome da pasta da execução. |
+| `--formato` | `md`, `html`, `ambos` ou `nenhum`. |
+
+A interface de terminal não expõe todas as opções do R, como escolha detalhada
+de análises, `n_por_camada`, distância por rede ou `sobrescrever`. Use
+`gs_analisar_locais()` no R para esses casos.
+
+## 🧰 Catálogo de ferramentas
+
+| Ferramenta | O que ela faz |
+|---|---|
+| `gs_camadas_disponiveis()` | Lê o catálogo remoto completo do WFS. |
+| `gs_camadas_equipamentos()` | Separa camadas cujo nome começa por `equipamento_`. |
+| `gs_catalogo_equipamentos()` | Mostra camadas de equipamento organizadas por tema. |
+| `gs_buscar_camadas(termo)` | Procura uma palavra no catálogo remoto. |
+| `gs_baixar_camada(camada)` | Baixa uma camada. |
+| `gs_baixar_camadas(camadas)` | Baixa várias camadas. |
+| `gs_baixar_servicos(tema)` | Baixa as camadas que combinam com um tema. |
+| `gs_baixar_todos_equipamentos()` | Baixa todos os equipamentos. |
+| `gs_metadados(termo)` | Procura documentos sobre os dados no catálogo GeoNetwork. |
+| `gs_metadado_registro(uuid)` | Lê um registro completo de metadados. |
+| `gs_listar_servicos()` | Lista camadas locais de pontos prontas para o radar. |
+| `gs_ler_cep(cep)` | Consulta e valida um CEP. |
+| `gs_indice_cep()` | Cria o índice local CEP -> coordenadas. |
+| `gs_cep_referencia()` | Produz uma referência representativa por CEP. |
+| `gs_cep_para_coordenadas(cep)` | Localiza a referência de um CEP. |
+| `gs_verificar_cep(cep, latitude, longitude)` | Compara CEP e coordenada. |
+| `gs_tipos_distancia()` | Explica as réguas disponíveis. |
+| `gs_servicos_proximos(...)` | Encontra equipamentos perto de uma origem. |
+| `gs_mapa_servicos(...)` | Cria mapa estático ou interativo. |
+| `gs_analise_servicos(...)` | Executa uma ou várias análises. |
+| `gs_salvar_analises(...)` | Salva resultados, figuras e relatórios juntos. |
+| `gs_exportar_resultado(...)` | Exporta artefatos de forma direta. |
+| `gs_relatorio_numerico(...)` | Gera um relatório de métricas. |
+| `gs_relatorio_analises(...)` | Gera relatório analítico em Markdown ou HTML. |
+| `gs_analisar_locais(...)` | Executa a expedição para vários locais. |
+
+## 🌐 O que funciona sem internet?
+
+| Tarefa | Precisa de internet? |
+|---|---|
+| Carregar funções depois de restaurar o ambiente | Não. |
+| Procurar serviços em CSVs já baixados, usando coordenadas e linha reta | Não. |
+| Localizar um CEP que esteja no índice local | Não. |
+| Listar ou baixar catálogo/camadas | Sim, GeoSampa WFS. |
+| Consultar metadados | Sim, GeoNetwork. |
+| Ler um CEP com `gs_ler_cep()` | Sim, ViaCEP. |
+| Localizar CEP fora do índice | Sim, ViaCEP e Nominatim. |
+| Calcular rota por rede | Sim, OSRM. |
+| Ver fundos de um mapa HTML | Sim, provedores de mapas. |
+
+Serviços públicos externos podem ficar lentos, mudar ou ficar indisponíveis.
+O projeto usa tentativas e espera progressiva, mas não há garantia de resposta.
+Respeite as políticas de uso dos provedores: evite downloads repetidos e não
+execute grandes lotes desnecessariamente.
+
+## ⚙️ Ajustes para quem precisa
+
+Quase todas as missões funcionam sem configuração extra. Se sua conexão for
+lenta, se você tiver seu próprio servidor de rotas ou se executar o projeto fora
+da pasta principal, estes ajustes podem ajudar. Execute-os no console do R antes
+da operação desejada:
+
+```r
+# Esperar até 180 segundos por cada pedido remoto e tentar quatro vezes
+options(gs.http_timeout_s = 180, gs.http_tentativas = 4)
+
+# Informar onde está a raiz se ela não for localizada automaticamente
+options(gs.raiz = "/caminho/para/geosampa")
+
+# Usar outro servidor e perfil do OSRM, se você tiver acesso a eles
+options(gs.osrm_server = "https://meu-servidor-osrm.exemplo/")
+options(gs.osrm_profile = "driving")
+```
+
+Essas opções valem somente enquanto a sessão R estiver aberta. Não é necessário
+alterá-las para o uso comum. O servidor público do OSRM possui limites próprios;
+use um servidor controlado por você apenas quando tiver permissão para isso.
+
+## ⚠️ Limites importantes da expedição
+
+### Dados não são uma amostra aleatória
+
+Os equipamentos encontrados são registros administrativos dentro do raio de
+busca. Eles não representam uma amostra aleatória da cidade. Diferenças entre
+dois CEPs são descritivas e não provam causa e efeito.
+
+### O radar enxerga um círculo, não o mundo inteiro
+
+O círculo da consulta não é automaticamente recortado pelo limite municipal ou
+pela cobertura de cada cadastro. Perto das bordas, a interpretação exige cuidado.
+
+### Poucos pontos limitam análises
+
+Análises como Moran, LISA, Getis-Ord, NNI, Voronoi, KDE e Ripley precisam de
+quantidade e distribuição adequadas de pontos. Uma mensagem de “não executada”
+é preferível a uma conclusão fraca.
+
+### Truncar muda a pergunta
+
+Se `n_por_camada` retirou ocorrências, você passou a analisar apenas os mais
+próximos, não o conjunto inteiro. Resultados que dependem da cobertura completa
+são bloqueados; não tente compará-los como se nada tivesse sido omitido.
+
+### Resultados espaciais são exploratórios
+
+Moran, LISA e Getis-Ord dependem de escolhas como tamanho de célula, vizinhança
+e área observada. Os p-valores e ajustes existentes ajudam na leitura, mas não
+eliminam sensibilidade à grade, a limites administrativos e à composição das
+camadas. Use resultados como investigação, não como prova final isolada.
+
+### CEP não é endereço preciso
+
+Um CEP pode cobrir uma rua inteira, e as bases local, ViaCEP e OpenStreetMap
+podem divergir. Antes de usar uma coordenada em situação crítica, confira a
+coluna de precisão e valide a fonte apropriada.
+
+## 🆘 Socorro: erros comuns
+
+| Situação | Causa provável | Caminho de saída |
+|---|---|---|
+| `Nenhum CSV` | Nenhuma camada de pontos foi baixada. | Use `gs_baixar_camada()` e depois `gs_listar_servicos()`. |
+| Camada não encontrada | Nome ou tema não combina com o catálogo local. | Veja `gs_listar_servicos()` ou `gs_catalogo_equipamentos()`. |
+| CEP inválido | O valor não tem oito dígitos ou não existe. | Revise o CEP; tente com ou sem hífen. |
+| CEP sem coordenada local | O índice é construído apenas com os CSVs já baixados. | Baixe mais dados ou conecte-se à internet. |
+| Coordenada inválida | Latitude e longitude foram trocadas ou estão fora do intervalo. | Use `c(latitude, longitude)`. |
+| Pacote ausente | O ambiente não foi restaurado ou falta dependência opcional. | Rode `Rscript scripts/configurar_ambiente.R`, reinicie o R e leia a mensagem. |
+| Saída já existe | A função protege arquivos anteriores. | Escolha outro nome ou use `sobrescrever = TRUE` conscientemente. |
+| Análise não executada | Faltam pontos, pacote, área adequada ou a amostra foi truncada. | Leia a mensagem da análise; amplie o raio ou escolha uma análise básica. |
+| Rota por rede falhou | OSRM ou a rede está indisponível. | Tente novamente mais tarde ou use `geodesica`/`euclidiana`. |
+| Mapa HTML sem fundo | Os mapas de base são carregados da internet. | Abra com conexão ativa. |
+
+## 🧪 Testar o kit
+
+Depois de preparar o ambiente, na raiz do projeto, execute:
+
+```bash
+Rscript tests/testthat.R
+```
+
+Não acrescente `--vanilla`: ele ignora `.Rprofile` e pode impedir a ativação do
+`renv`. Parte da suíte depende de dados locais; numa clonagem sem `data/`, alguns
+testes são pulados.
+
+Os testes de integração real são opcionais e consultam serviços externos:
+
+```bash
+GEOSAMPA_RUN_NETWORK_TESTS=true \
+Rscript -e 'testthat::test_dir("tests/testthat", filter = "integracao-rede", stop_on_failure = TRUE)'
+```
+
+## 📚 Glossário de bolso
+
+| Palavra | Tradução simples |
+|---|---|
+| Camada | Uma folha de informações sobre a cidade. |
+| CSV | Tabela de texto que abre em planilhas. |
+| GeoJSON | Arquivo que guarda dados e geometria para mapas. |
+| Geocodificação | Transformar endereço ou CEP em coordenadas. |
+| Latitude/longitude | Os dois números que localizam um ponto no planeta. |
+| Metadado | A ficha de identidade do dado: origem, data, descrição e responsável. |
+| Raio/buffer | Círculo em volta de um ponto, medido em metros. |
+| WFS | Porta pela qual o GeoSampa entrega dados de mapa. |
+| EPSG:31983 | Sistema oficial de coordenadas do GeoSampa, útil para medir metros em São Paulo. |
+| EPSG:4326 | Latitude e longitude em graus, formato comum em mapas e planilhas. |
+| OSRM | Serviço externo que calcula rotas pela rede viária. |
+| Isócrona | Área alcançável por rota em determinado custo; não é criada automaticamente neste projeto. |
+
+## 📖 Fontes e cuidado com os dados
+
+- [Portal GeoSampa](https://geosampa.prefeitura.sp.gov.br)
+- [WFS GeoSampa](https://wfs.geosampa.prefeitura.sp.gov.br/geoserver/geoportal/wfs)
+- [Catálogo de metadados](https://metadados.geosampa.prefeitura.sp.gov.br)
+- [ViaCEP](https://viacep.com.br)
+- [Nominatim / OpenStreetMap](https://nominatim.openstreetmap.org)
+- [OSRM](https://project-osrm.org)
+
+Antes de publicar um mapa ou análise, leia o metadado da camada utilizada,
+cite a fonte e confira a data de atualização. Boa expedição! 🧭

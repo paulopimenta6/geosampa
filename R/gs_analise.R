@@ -10,28 +10,334 @@
 # instalado, em vez de falharem.
 # ============================================================
 
+# --- Utilitários internos -----------------------------------------------------
+gs_dominio_consulta <- function(resultado, ponto = NULL, raio_m = NULL) {
+  ponto_armazenado <- attr(resultado, "ponto")
+  raio_armazenado <- attr(resultado, "raio_m")
+  ponto_informado <- !is.null(ponto)
+  raio_informado <- !is.null(raio_m)
+  if (!ponto_informado) ponto <- ponto_armazenado
+  if (!raio_informado) raio_m <- raio_armazenado
+
+  if (isTRUE(attr(resultado, "amostra_truncada"))) {
+    return(list(
+      executado = FALSE,
+      mensagem = paste0(
+        "A análise requer todas as ocorrências no domínio, mas o resultado foi ",
+        "truncado por `n_por_camada`. Refaça a busca sem esse limite."
+      )
+    ))
+  }
+  tipo_distancia <- attr(resultado, "tipo_distancia")
+  if (length(tipo_distancia) > 0 && !is.na(tipo_distancia[1]) &&
+      identical(as.character(tipo_distancia[1]), "rede_viaria")) {
+    return(list(
+      executado = FALSE,
+      mensagem = paste0(
+        "A distância por rede viária não define uma janela observacional ",
+        "sem uma isócrona. Use uma distância em linha reta nesta análise."
+      )
+    ))
+  }
+
+  raio_m <- suppressWarnings(as.numeric(raio_m)[1])
+  raio_original <- suppressWarnings(as.numeric(raio_armazenado)[1])
+  if (raio_informado && !is.na(raio_original) && is.finite(raio_original) &&
+      (!is.finite(raio_m) || abs(raio_m - raio_original) > 1e-7)) {
+    return(list(
+      executado = FALSE,
+      mensagem = paste0(
+        "`raio_m` não pode alterar o domínio armazenado no resultado (",
+        raio_original, " m). Refaça a consulta para usar outro raio."
+      )
+    ))
+  }
+  if (length(raio_m) == 0 || !is.finite(raio_m) || raio_m <= 0) {
+    return(list(executado = FALSE,
+                mensagem = "Raio da consulta ausente ou inválido."))
+  }
+
+  como_ponto_sf <- function(x) {
+    ponto_sf <- NULL
+    if (is.list(x) && !is.null(x$sf)) {
+      ponto_sf <- x$sf
+    } else if (inherits(x, c("sf", "sfc"))) {
+      ponto_sf <- x
+    } else if (is.list(x) &&
+               all(c("longitude", "latitude") %in% names(x))) {
+      xy <- suppressWarnings(as.numeric(c(x$longitude[1], x$latitude[1])))
+      if (length(xy) == 2 && all(is.finite(xy))) {
+        ponto_sf <- sf::st_sfc(sf::st_point(xy), crs = gs_epsg$wgs84)
+      }
+    }
+    if (inherits(ponto_sf, "sf")) ponto_sf <- sf::st_geometry(ponto_sf)
+    ponto_sf
+  }
+  ponto_sf <- como_ponto_sf(ponto)
+  if (!inherits(ponto_sf, "sfc") || length(ponto_sf) != 1 ||
+      is.na(sf::st_crs(ponto_sf)) || any(sf::st_is_empty(ponto_sf))) {
+    return(list(executado = FALSE,
+                mensagem = "Ponto da consulta ausente ou inválido."))
+  }
+  if (!identical(as.character(sf::st_geometry_type(ponto_sf))[1], "POINT")) {
+    return(list(executado = FALSE,
+                mensagem = "A geometria da consulta deve ser um único ponto."))
+  }
+  if (ponto_informado && !is.null(ponto_armazenado)) {
+    ponto_original_sf <- como_ponto_sf(ponto_armazenado)
+    deslocamento <- tryCatch(as.numeric(sf::st_distance(
+      sf::st_transform(ponto_sf, gs_epsg$oficial),
+      sf::st_transform(ponto_original_sf, gs_epsg$oficial)
+    )), error = function(e) Inf)
+    if (length(deslocamento) != 1 || !is.finite(deslocamento) ||
+        deslocamento > 0.01) {
+      return(list(
+        executado = FALSE,
+        mensagem = paste0(
+          "`ponto` não pode alterar a origem armazenada no resultado. ",
+          "Refaça a consulta para usar outra origem."
+        )
+      ))
+    }
+  }
+
+  ponto_utm <- tryCatch(
+    sf::st_transform(ponto_sf, gs_epsg$oficial),
+    error = function(e) NULL
+  )
+  if (is.null(ponto_utm)) {
+    return(list(executado = FALSE,
+                mensagem = "Não foi possível projetar o ponto da consulta."))
+  }
+  tipo_distancia <- if (length(tipo_distancia) == 0 || is.na(tipo_distancia[1])) {
+    "geodesica"
+  } else {
+    as.character(tipo_distancia[1])
+  }
+  dominio <- if (tipo_distancia %in% c("geodesica", "haversine")) {
+    tryCatch({
+      raio_esfera <- if (identical(tipo_distancia, "haversine")) {
+        6371000
+      } else {
+        s2::s2_earth_radius_meters()
+      }
+      circulo <- s2::s2_buffer_cells(
+        s2::as_s2_geography(sf::st_transform(ponto_sf, gs_epsg$wgs84)),
+        distance = raio_m, max_cells = 10000, radius = raio_esfera
+      )
+      sf::st_transform(sf::st_as_sfc(circulo), gs_epsg$oficial)
+    }, error = function(e) NULL)
+  } else if (identical(tipo_distancia, "manhattan")) {
+    centro <- sf::st_coordinates(ponto_utm)[1, ]
+    sf::st_sfc(sf::st_polygon(list(rbind(
+      centro + c(0, raio_m), centro + c(raio_m, 0),
+      centro + c(0, -raio_m), centro + c(-raio_m, 0),
+      centro + c(0, raio_m)
+    ))), crs = sf::st_crs(ponto_utm))
+  } else {
+    tryCatch(sf::st_buffer(ponto_utm, raio_m), error = function(e) NULL)
+  }
+  if (is.null(dominio) || any(sf::st_is_empty(dominio))) {
+    return(list(executado = FALSE,
+                mensagem = "Não foi possível construir o buffer da consulta."))
+  }
+
+  list(executado = TRUE, ponto = ponto_utm, dominio = dominio,
+       raio_m = raio_m, tipo_distancia = tipo_distancia)
+}
+
+gs_com_seed <- function(seed, expr) {
+  if (is.null(seed)) return(force(expr))
+  seed <- suppressWarnings(as.integer(seed)[1])
+  if (!is.finite(seed)) stop("`seed` deve ser um número inteiro finito.")
+
+  tinha_seed <- exists(".Random.seed", envir = .GlobalEnv, inherits = FALSE)
+  if (tinha_seed) seed_anterior <- get(".Random.seed", envir = .GlobalEnv)
+  on.exit({
+    if (tinha_seed) {
+      assign(".Random.seed", seed_anterior, envir = .GlobalEnv)
+    } else if (exists(".Random.seed", envir = .GlobalEnv, inherits = FALSE)) {
+      rm(".Random.seed", envir = .GlobalEnv)
+    }
+  }, add = TRUE)
+  set.seed(seed)
+  force(expr)
+}
+
+gs_simular_taxas_area <- function(contagens, areas, nsim, seed = 123) {
+  contagens <- suppressWarnings(as.integer(contagens))
+  areas <- suppressWarnings(as.numeric(areas))
+  if (length(contagens) != length(areas) || length(areas) < 2 ||
+      any(!is.finite(areas)) || any(areas <= 0) ||
+      any(!is.finite(contagens)) || any(contagens < 0)) {
+    stop("Contagens e áreas inválidas para a simulação espacial.")
+  }
+  total <- sum(contagens)
+  if (total < 1) stop("Nenhuma ocorrência disponível para a simulação espacial.")
+  simuladas <- gs_com_seed(seed, stats::rmultinom(
+    n = nsim, size = total, prob = areas / sum(areas)
+  ))
+  sweep(simuladas, 1, areas, "/")
+}
+
+gs_pvalor_mc_bilateral <- function(observado, simulados) {
+  simulados <- suppressWarnings(as.numeric(simulados))
+  simulados <- simulados[is.finite(simulados)]
+  if (!is.finite(observado) || length(simulados) < 1) return(NA_real_)
+  centro <- mean(simulados)
+  (1 + sum(abs(simulados - centro) >= abs(observado - centro))) /
+    (length(simulados) + 1)
+}
+
+gs_pvalores_locais_mc <- function(observados, simulados) {
+  observados <- suppressWarnings(as.numeric(observados))
+  simulados <- as.matrix(simulados)
+  vapply(seq_along(observados), function(i) {
+    gs_pvalor_mc_bilateral(observados[i], simulados[i, ])
+  }, numeric(1))
+}
+
+gs_ajustar_p_finitos <- function(p, metodo = "BH") {
+  p <- suppressWarnings(as.numeric(p))
+  ajustado <- rep(NA_real_, length(p))
+  validos <- is.finite(p)
+  ajustado[validos] <- stats::p.adjust(p[validos], method = metodo)
+  ajustado
+}
+
+gs_moran_i <- function(x, lw) {
+  unname(spdep::moran(
+    x, lw, n = length(x), S0 = spdep::Szero(lw), zero.policy = FALSE
+  )$I)
+}
+
+gs_distancias_resultado <- function(resultado) {
+  if ("distancia_m_exata" %in% names(resultado)) {
+    return(suppressWarnings(as.numeric(resultado$distancia_m_exata)))
+  }
+  if (!"distancia_m" %in% names(resultado)) return(numeric(0))
+  distancia <- resultado$distancia_m
+  if (is.factor(distancia)) distancia <- as.character(distancia)
+  distancia <- suppressWarnings(as.numeric(distancia))
+  legado <- attr(resultado, "distancias_m_exatas")
+  if (is.numeric(legado) && length(legado) == length(distancia) &&
+      all(is.na(legado) == is.na(distancia)) &&
+      isTRUE(all.equal(round(legado, 1), distancia, check.attributes = FALSE))) {
+    seguro <- rep(FALSE, length(distancia))
+    grupos <- split(seq_along(distancia), distancia, drop = TRUE)
+    for (indices in grupos) {
+      valores <- legado[indices]
+      seguro[indices] <- length(indices) == 1 ||
+        length(unique(valores[is.finite(valores)])) <= 1
+    }
+    distancia[seguro] <- legado[seguro]
+  }
+  distancia
+}
+
+gs_requer_amostra_completa <- function(resultado, analise) {
+  if (!isTRUE(attr(resultado, "amostra_truncada"))) return(NULL)
+  list(
+    executado = FALSE,
+    mensagem = paste0(
+      "A análise '", analise, "' requer todas as ocorrências no raio, mas ",
+      "`n_por_camada` omitiu resultados. Refaça a busca sem esse limite."
+    )
+  )
+}
+
+gs_resumo_distancias <- function(x) {
+  if (is.factor(x)) x <- as.character(x)
+  x <- suppressWarnings(as.numeric(x))
+  validos <- is.finite(x)
+  x_ok <- x[validos]
+  n <- length(x_ok)
+  nomes <- c("n", "n_ausentes", "min", "p05", "p25", "mediana",
+             "media", "p75", "p95", "max", "mad", "iqr", "sd", "cv",
+             "erro_padrao", "ic95_media_inf", "ic95_media_sup")
+  out <- stats::setNames(rep(NA_real_, length(nomes)), nomes)
+  out[c("n", "n_ausentes")] <- c(n, sum(!validos))
+  if (n == 0) return(out)
+
+  qs <- stats::quantile(x_ok, c(0.05, 0.25, 0.5, 0.75, 0.95),
+                        names = FALSE, type = 7)
+  media <- mean(x_ok)
+  desvio <- if (n > 1) stats::sd(x_ok) else NA_real_
+  erro <- if (n > 1 && is.finite(desvio)) desvio / sqrt(n) else NA_real_
+  margem <- if (is.finite(erro)) stats::qt(0.975, df = n - 1) * erro else NA_real_
+  out[c("min", "p05", "p25", "mediana", "media", "p75", "p95", "max",
+        "mad", "iqr", "sd", "cv", "erro_padrao", "ic95_media_inf",
+        "ic95_media_sup")] <- c(
+          min(x_ok), qs[1], qs[2], qs[3], media, qs[4], qs[5], max(x_ok),
+          stats::mad(x_ok, center = qs[3], constant = 1.4826), qs[4] - qs[2],
+          desvio, if (is.finite(desvio) && media != 0) 100 * desvio / media else NA_real_,
+          erro, media - margem, media + margem
+        )
+  out
+}
+
 # --- Descritivas: contagens e distribuição das distâncias --------------------
 gs_analise_descritivas <- function(resultado) {
-  n_por_camada <- as.data.frame(table(resultado$camada))
+  if (!is.data.frame(resultado) || !"distancia_m" %in% names(resultado)) {
+    return(list(executado = FALSE,
+                mensagem = "Resultado sem a coluna numérica 'distancia_m'."))
+  }
+  distancia <- gs_distancias_resultado(resultado)
+  medidas <- gs_resumo_distancias(distancia)
+  if (medidas[["n"]] == 0) {
+    return(list(executado = FALSE,
+                mensagem = "Nenhuma distância válida para a análise descritiva."))
+  }
+
+  validos <- is.finite(distancia)
+  dados_plot <- resultado[validos, , drop = FALSE]
+  dados_plot$distancia_m <- distancia[validos]
+  if (!"camada" %in% names(dados_plot)) dados_plot$camada <- "geral"
+  dados_plot$camada <- as.character(dados_plot$camada)
+  dados_plot$camada[is.na(dados_plot$camada) | !nzchar(dados_plot$camada)] <-
+    "(sem camada)"
+
+  n_por_camada <- as.data.frame(table(dados_plot$camada))
   names(n_por_camada) <- c("camada", "n")
   rownames(n_por_camada) <- NULL
 
   n_por_tipo <- NULL
-  if ("tipo_servico" %in% names(resultado) && !all(is.na(resultado$tipo_servico))) {
-    n_por_tipo <- as.data.frame(table(resultado$tipo_servico))
+  if ("tipo_servico" %in% names(dados_plot) &&
+      !all(is.na(dados_plot$tipo_servico))) {
+    n_por_tipo <- as.data.frame(table(dados_plot$tipo_servico))
     names(n_por_tipo) <- c("tipo_servico", "n")
     rownames(n_por_tipo) <- NULL
   }
 
-  mediana <- stats::median(resultado$distancia_m)
-  media   <- mean(resultado$distancia_m)
+  mediana <- medidas[["mediana"]]
+  media <- medidas[["media"]]
+  resumo_basico <- summary(dados_plot$distancia_m)
+  resumo_estendido <- c(
+    resumo_basico,
+    P05 = medidas[["p05"]], MAD = medidas[["mad"]],
+    IQR = medidas[["iqr"]], P95 = medidas[["p95"]],
+    `IC95 média (inf.)` = medidas[["ic95_media_inf"]],
+    `IC95 média (sup.)` = medidas[["ic95_media_sup"]]
+  )
 
   list(
+    executado        = TRUE,
+    amostra_truncada = isTRUE(attr(resultado, "amostra_truncada")),
     n_total          = nrow(resultado),
     n_por_camada     = n_por_camada,
     n_por_tipo       = n_por_tipo,
-    resumo_distancia = summary(resultado$distancia_m),
-    histograma = ggplot2::ggplot(resultado, ggplot2::aes(x = distancia_m)) +
+    resumo_distancia = resumo_estendido,
+    estatisticas_distancia = as.data.frame(as.list(medidas),
+                                           check.names = FALSE),
+    metodo_ic = if (medidas[["n"]] > 1) {
+      paste0(
+        "IC descritivo de 95% t de Student para a média, sob hipótese i.i.d.; ",
+        "não representa incerteza censitária dos dados administrativos"
+      )
+    } else {
+      "IC não calculado: menos de duas observações"
+    },
+    histograma = ggplot2::ggplot(dados_plot, ggplot2::aes(x = distancia_m)) +
       ggplot2::geom_histogram(bins = 20, fill = "#2c7fb8", color = "white") +
       ggplot2::geom_vline(xintercept = mediana, color = "#d7301f",
                           linetype = "dashed", linewidth = 0.8) +
@@ -41,7 +347,8 @@ gs_analise_descritivas <- function(resultado) {
                     title = "Distribuição das distâncias",
                     caption = "Vermelho tracejado: mediana | Azul: média") +
       ggplot2::theme_minimal(),
-    boxplot = ggplot2::ggplot(resultado, ggplot2::aes(x = camada, y = distancia_m)) +
+    boxplot = ggplot2::ggplot(dados_plot,
+                              ggplot2::aes(x = camada, y = distancia_m)) +
       ggplot2::geom_boxplot(fill = "#41b6c4") +
       ggplot2::stat_summary(fun = stats::median, geom = "point",
                             shape = 18, size = 3, color = "#d7301f") +
@@ -55,62 +362,237 @@ gs_analise_descritivas <- function(resultado) {
 
 # --- Vizinho mais próximo: menor distância (geral e por camada) ---------------
 gs_analise_vizinho <- function(resultado) {
+  if (!is.data.frame(resultado) || nrow(resultado) == 0 ||
+      !all(c("camada", "distancia_m") %in% names(resultado))) {
+    return(list(executado = FALSE,
+                mensagem = "Nenhum serviço válido para identificar o vizinho mais próximo."))
+  }
+  distancia <- gs_distancias_resultado(resultado)
+  resultado <- resultado[is.finite(distancia), , drop = FALSE]
+  resultado$.distancia_exata <- distancia[is.finite(distancia)]
+  if (nrow(resultado) == 0) {
+    return(list(executado = FALSE,
+                mensagem = "Nenhuma distância finita para identificar o vizinho mais próximo."))
+  }
   por_camada <- do.call(rbind, lapply(split(resultado, resultado$camada), function(d) {
-    i <- which.min(d$distancia_m)
+    i <- which.min(d$.distancia_exata)
     data.frame(camada = d$camada[i], nome = d$nome[i],
-               distancia_m = d$distancia_m[i], stringsAsFactors = FALSE)
+               distancia_m = d$distancia_m[i],
+               distancia_m_exata = d$.distancia_exata[i],
+               stringsAsFactors = FALSE)
   }))
   rownames(por_camada) <- NULL
-  i <- which.min(resultado$distancia_m)
+  i <- which.min(resultado$.distancia_exata)
+  resultado$.distancia_exata <- NULL
   list(
+    executado              = TRUE,
     vizinho_mais_proximo = resultado[i, , drop = FALSE],
     por_camada           = por_camada
   )
 }
 
 # --- Voronoi/Thiessen: áreas de influência dos serviços -----------------------
-# Devolve um sf de polígonos (em EPSG:4326) recortado pela bbox ao redor do
-# ponto. O cálculo é feito na projeção oficial (metros) — st_voronoi não
-# funciona sobre coordenadas geográficas.
-gs_analise_voronoi <- function(resultado, ponto) {
-  pts <- sf::st_as_sf(resultado, coords = c("longitude", "latitude"),
-                      crs = gs_epsg$wgs84)
-  pts_utm <- sf::st_transform(pts, gs_epsg$oficial)
-  ponto_utm <- sf::st_transform(ponto$sf, gs_epsg$oficial)
-  bbox <- sf::st_bbox(sf::st_buffer(ponto_utm, 5000))
-  envelope <- sf::st_as_sfc(bbox)
-  vor <- sf::st_voronoi(sf::st_geometry(pts_utm), envelope = envelope)
-  pol <- sf::st_collection_extract(vor, "POLYGON")
-  pol <- sf::st_sf(geometry = pol)
-  pol <- sf::st_intersection(pol, envelope)
+# Devolve um sf de polígonos (em EPSG:4326) recortado pelo buffer da consulta.
+# O cálculo é feito na projeção oficial (metros), sobre um único MULTIPOINT.
+gs_analise_voronoi <- function(resultado, ponto = NULL, raio_m = NULL) {
+  dominio <- gs_dominio_consulta(resultado, ponto, raio_m)
+  if (!isTRUE(dominio$executado)) return(dominio)
+  if (!is.data.frame(resultado) ||
+      !all(c("longitude", "latitude") %in% names(resultado))) {
+    return(list(executado = FALSE,
+                mensagem = "Resultado sem coordenadas para calcular Voronoi."))
+  }
+
+  lon <- suppressWarnings(as.numeric(resultado$longitude))
+  lat <- suppressWarnings(as.numeric(resultado$latitude))
+  validos <- is.finite(lon) & is.finite(lat)
+  if (!any(validos)) {
+    return(list(executado = FALSE,
+                mensagem = "Nenhuma coordenada válida para calcular Voronoi."))
+  }
+  dados <- resultado[validos, , drop = FALSE]
+  dados$longitude <- lon[validos]
+  dados$latitude <- lat[validos]
+  pts_utm <- tryCatch(
+    sf::st_transform(
+      sf::st_as_sf(dados, coords = c("longitude", "latitude"),
+                   crs = gs_epsg$wgs84),
+      gs_epsg$oficial
+    ),
+    error = function(e) NULL
+  )
+  if (is.null(pts_utm)) {
+    return(list(executado = FALSE,
+                mensagem = "Não foi possível projetar os pontos para calcular Voronoi."))
+  }
+  dentro <- lengths(sf::st_intersects(pts_utm, dominio$dominio)) > 0
+  pts_utm <- pts_utm[dentro, , drop = FALSE]
+  if (nrow(pts_utm) == 0) {
+    return(list(executado = FALSE,
+                mensagem = "Nenhum ponto está dentro do domínio da consulta."))
+  }
+
+  coords <- sf::st_coordinates(pts_utm)
+  chave <- paste(format(coords[, 1], digits = 15, scientific = FALSE,
+                        trim = TRUE),
+                 format(coords[, 2], digits = 15, scientific = FALSE,
+                        trim = TRUE), sep = "|")
+  grupos <- split(seq_len(nrow(pts_utm)), factor(chave, levels = unique(chave)))
+  primeiro <- vapply(grupos, `[`, integer(1), 1)
+  agrega_texto <- function(x, separador) {
+    x <- unique(as.character(x[!is.na(x) & nzchar(as.character(x))]))
+    if (length(x) == 0) NA_character_ else paste(x, collapse = separador)
+  }
+  valor_coluna <- function(nome, i) {
+    if (nome %in% names(pts_utm)) pts_utm[[nome]][i] else rep(NA, length(i))
+  }
+  atributos <- do.call(rbind, lapply(grupos, function(i) {
+    distancias <- suppressWarnings(as.numeric(valor_coluna("distancia_m", i)))
+    data.frame(
+      camada = agrega_texto(valor_coluna("camada", i), ", "),
+      nome = agrega_texto(valor_coluna("nome", i), "; "),
+      distancia_m = if (any(is.finite(distancias))) min(distancias, na.rm = TRUE) else NA_real_,
+      n_servicos = length(i),
+      stringsAsFactors = FALSE
+    )
+  }))
+  sites <- sf::st_sf(site_id = seq_along(grupos), atributos,
+                     geometry = sf::st_geometry(pts_utm)[primeiro])
+  if (nrow(sites) < 2) {
+    return(list(executado = FALSE,
+                mensagem = paste0(
+                  "São necessárias ao menos 2 coordenadas distintas para ",
+                  "construir o Voronoi."
+                ),
+                n_deduplicados = nrow(pts_utm) - nrow(sites)))
+  }
+
+  multiponto <- sf::st_union(sf::st_geometry(sites))
+  envelope <- sf::st_as_sfc(sf::st_bbox(dominio$dominio))
+  geometrias <- tryCatch(
+    sf::st_collection_extract(
+      sf::st_voronoi(multiponto, envelope = envelope), "POLYGON"
+    ),
+    error = function(e) NULL
+  )
+  if (is.null(geometrias) || length(geometrias) == 0) {
+    return(list(executado = FALSE,
+                mensagem = "Não foi possível construir as células de Voronoi."))
+  }
+  celulas <- sf::st_sf(cell_id = seq_along(geometrias),
+                       geometry = geometrias)
+  celulas <- tryCatch(
+    suppressWarnings(sf::st_intersection(
+      celulas, sf::st_sf(.dominio = 1L, geometry = dominio$dominio)
+    )),
+    error = function(e) NULL
+  )
+  if (is.null(celulas)) {
+    return(list(executado = FALSE,
+                mensagem = "Falha ao recortar as células pelo buffer da consulta."))
+  }
+
+  areas <- suppressWarnings(as.numeric(sf::st_area(celulas)))
+  celulas <- celulas[!sf::st_is_empty(celulas) & is.finite(areas) & areas > 0,
+                     , drop = FALSE]
+  if (nrow(celulas) == 0) {
+    return(list(executado = FALSE,
+                mensagem = "O recorte não produziu células de Voronoi válidas."))
+  }
+  hits <- sf::st_intersects(celulas, sites)
+  associacao <- vapply(seq_len(nrow(celulas)), function(i) {
+    if (length(hits[[i]]) == 1) return(hits[[i]])
+    sf::st_nearest_feature(sf::st_point_on_surface(celulas[i, , drop = FALSE]),
+                           sites)
+  }, integer(1))
+  atributos_saida <- sf::st_drop_geometry(sites)[
+    match(associacao, sites$site_id),
+    c("camada", "nome", "distancia_m", "n_servicos"), drop = FALSE
+  ]
+  pol <- sf::st_sf(atributos_saida, geometry = sf::st_geometry(celulas))
+  pol <- pol[order(associacao), , drop = FALSE]
   pol <- sf::st_transform(pol, gs_epsg$wgs84)
-  pol$camada       <- pts$camada
-  pol$nome         <- pts$nome
-  pol$distancia_m  <- pts$distancia_m
+  attr(pol, "raio_m") <- dominio$raio_m
+  attr(pol, "n_deduplicados") <- nrow(pts_utm) - nrow(sites)
   pol
 }
 
 # --- Densidade de kernel dos serviços -----------------------------------------
 gs_analise_kde <- function(resultado, ponto) {
-  ggplot2::ggplot(resultado, ggplot2::aes(x = longitude, y = latitude)) +
-    ggplot2::stat_density_2d(ggplot2::aes(fill = ggplot2::after_stat(density)),
-                             geom = "raster", contour = FALSE, alpha = 0.8) +
+  incompleta <- gs_requer_amostra_completa(resultado, "kde")
+  if (!is.null(incompleta)) return(incompleta)
+  if (!is.data.frame(resultado) || nrow(resultado) < 3 ||
+      !all(c("longitude", "latitude") %in% names(resultado))) {
+    return(list(executado = FALSE,
+                mensagem = "São necessários ao menos 3 pontos para estimar a densidade."))
+  }
+  pts <- tryCatch(
+    sf::st_transform(
+      sf::st_as_sf(resultado, coords = c("longitude", "latitude"),
+                   crs = gs_epsg$wgs84),
+      gs_epsg$oficial
+    ),
+    error = function(e) NULL
+  )
+  if (is.null(pts)) {
+    return(list(executado = FALSE,
+                mensagem = "Não foi possível projetar os pontos para a KDE."))
+  }
+  xy <- sf::st_coordinates(pts)
+  if (length(unique(xy[, 1])) < 2 || length(unique(xy[, 2])) < 2) {
+    return(list(executado = FALSE,
+                mensagem = "A KDE exige variação nas duas coordenadas espaciais."))
+  }
+  dados <- data.frame(x_m = xy[, 1], y_m = xy[, 2])
+  ggplot2::ggplot(dados, ggplot2::aes(x = x_m, y = y_m)) +
+    ggplot2::stat_density_2d(
+      ggplot2::aes(fill = ggplot2::after_stat(density)),
+      geom = "raster", contour = FALSE, alpha = 0.82
+    ) +
     ggplot2::scale_fill_viridis_c() +
     ggplot2::geom_point(color = "#d7301f", size = 1) +
+    ggplot2::coord_equal() +
     ggplot2::theme_minimal() +
     ggplot2::labs(
       title = "Densidade de kernel dos serviços",
-      subtitle = sprintf("Ponto: %s", ponto$origem)
+      subtitle = sprintf("Ponto: %s | projeção EPSG:%s", ponto$origem,
+                         gs_epsg$oficial),
+      x = "Coordenada leste (m)", y = "Coordenada norte (m)",
+      fill = "Densidade"
     )
 }
 
 # --- Raios progressivos: oportunidades acumuladas ------------------------------
 # Devolve a contagem acumulada por raio (tabela) e a curva correspondente.
 gs_analise_raios <- function(resultado, ponto, raios = c(500, 1000, 2000)) {
+  incompleta <- gs_requer_amostra_completa(resultado, "raios_progressivos")
+  if (!is.null(incompleta)) return(incompleta)
+  raios <- suppressWarnings(as.numeric(raios))
+  if (length(raios) == 0 || any(!is.finite(raios)) || any(raios <= 0)) {
+    return(list(executado = FALSE,
+                mensagem = "Os raios progressivos devem ser números positivos."))
+  }
+  raio_consulta <- suppressWarnings(as.numeric(attr(resultado, "raio_m"))[1])
+  if (is.finite(raio_consulta) && any(raios > raio_consulta)) {
+    return(list(
+      executado = FALSE,
+      mensagem = paste0(
+        "Os raios progressivos não podem exceder o raio observado de ",
+        raio_consulta, " m."
+      )
+    ))
+  }
+  distancias <- gs_distancias_resultado(resultado)
+  distancias <- distancias[is.finite(distancias)]
+  if (length(distancias) == 0) {
+    return(list(executado = FALSE,
+                mensagem = "Nenhuma distância válida para os raios progressivos."))
+  }
+  raios <- sort(unique(raios))
   contagem <- data.frame(
     raio_m = raios,
-    n_servicos = vapply(raios, function(r) sum(resultado$distancia_m <= r),
-                        integer(1))
+    n_servicos = vapply(raios, function(r) sum(distancias <= r),
+                         integer(1))
   )
   grafico <- ggplot2::ggplot(contagem, ggplot2::aes(x = raio_m, y = n_servicos)) +
     ggplot2::geom_area(alpha = 0.15, fill = "#2c7fb8") +
@@ -121,90 +603,186 @@ gs_analise_raios <- function(resultado, ponto, raios = c(500, 1000, 2000)) {
                   title = "Oportunidades acumuladas por raio",
                   subtitle = sprintf("Ponto: %s", ponto$origem)) +
     ggplot2::theme_minimal()
-  list(contagem = contagem, grafico = grafico)
+  list(executado = TRUE, contagem = contagem, grafico = grafico)
 }
 
 # --- Autocorrelação espacial (Moran's I) — requer spdep ------------------------
-# A versão padrão (sobre_grade = TRUE) aplica Moran's I às CONTAGENS de
-# serviços por célula hexagonal (via gs_grade_hex), a aplicação estatisticamente
-# correta para pontos. A versão alternativa (sobre_grade = FALSE) aplica às
+# A versão padrão (sobre_grade = TRUE) aplica Moran's I à DENSIDADE de
+# serviços por célula hexagonal (via gs_grade_hex), controlando a menor exposição
+# das células recortadas na borda. A versão alternativa (sobre_grade = FALSE) aplica às
 # distâncias radiais e é mantida apenas como DIAGNÓSTICO, com ressalva: essa
 # variável tem gradiente espacial construído (distância a um único ponto), o que
 # tende a indicar agrupamento por construção.
 # Nota de interpretação: para diagnósticos finos, agregue por unidade espacial
 # (ex.: distritos) — veja `moran_distrital`.
 gs_analise_moran <- function(resultado, celula_m = gs_celula_hex_m,
-                             sobre_grade = TRUE) {
+                             sobre_grade = TRUE, nsim = 999, seed = 123,
+                             ponto = NULL, raio_m = NULL) {
   if (!requireNamespace("spdep", quietly = TRUE)) {
     return(list(
       executado = FALSE,
       mensagem = "Pacote 'spdep' não instalado. Instale com: install.packages('spdep')"
     ))
   }
+  nsim <- suppressWarnings(as.integer(nsim)[1])
+  seed_valido <- is.null(seed) ||
+    (length(seed) > 0 && is.finite(suppressWarnings(as.numeric(seed)[1])))
+  if (!is.finite(nsim) || nsim < 1 || !seed_valido) {
+    return(list(executado = FALSE,
+                mensagem = "`nsim` e `seed` devem ser números inteiros válidos."))
+  }
+  dominio_validacao <- gs_dominio_consulta(resultado, ponto, raio_m)
+  if (!isTRUE(dominio_validacao$executado)) return(dominio_validacao)
 
   if (sobre_grade) {
-    grade <- gs_grade_hex(resultado, celula_m)
-    ocupadas <- grade[!is.na(grade$camadas), , drop = FALSE]
-    if (nrow(ocupadas) < 4) {
+    grade <- gs_grade_hex(resultado, celula_m, ponto = ponto, raio_m = raio_m)
+    if (!inherits(grade, "sf")) return(grade)
+    if (nrow(grade) < 4) {
       return(list(executado = FALSE,
-                  mensagem = "Menos de 4 células com serviços para Moran's I sobre a grade hexagonal."))
+                  mensagem = "Menos de 4 células no domínio para Moran's I."))
     }
-    nb <- spdep::poly2nb(sf::st_geometry(ocupadas), queen = TRUE)
-    lw <- spdep::nb2listw(nb, style = "W", zero.policy = TRUE)
-    teste <- tryCatch(
-      spdep::moran.test(ocupadas$n_servicos, lw, zero.policy = TRUE),
-      error = function(e) NULL
-    )
-    if (is.null(teste)) {
+    x <- as.numeric(grade$densidade_por_km2)
+    variancia <- stats::var(x)
+    if (!is.finite(variancia) || variancia <= 0) {
       return(list(executado = FALSE,
-                  mensagem = "Falha ao executar Moran's I (configuração de vizinhança inválida)."))
+                  mensagem = "Densidades sem variância — Moran's I não é definido."))
     }
-    moran_i <- unname(teste$estimate["Moran I statistic"])
-    valor_p <- teste$p.value
+    nb <- tryCatch(spdep::poly2nb(sf::st_geometry(grade), queen = TRUE),
+                   error = function(e) NULL)
+    graus <- if (is.null(nb)) integer(0) else spdep::card(nb)
+    if (length(graus) != nrow(grade) || sum(graus) == 0 || any(graus == 0)) {
+      return(list(executado = FALSE,
+                  mensagem = "Vizinhança da grade inválida ou com células isoladas."))
+    }
+    lw <- tryCatch(spdep::nb2listw(nb, style = "W", zero.policy = FALSE),
+                   error = function(e) NULL)
+    if (is.null(lw)) {
+      return(list(executado = FALSE,
+                  mensagem = "Não foi possível construir os pesos espaciais da grade."))
+    }
+    moran_i <- tryCatch(gs_moran_i(x, lw), error = function(e) NA_real_)
+    simulados <- tryCatch({
+      taxas <- gs_simular_taxas_area(
+        grade$n_servicos, grade$area_observada_km2, nsim, seed
+      )
+      apply(taxas, 2, function(x_sim) {
+        tryCatch(gs_moran_i(x_sim, lw), error = function(e) NA_real_)
+      })
+    }, error = function(e) NULL)
+    valor_p <- if (is.null(simulados)) NA_real_ else
+      gs_pvalor_mc_bilateral(moran_i, simulados)
+    if (!is.finite(moran_i) || !is.finite(valor_p)) {
+      return(list(executado = FALSE,
+                  mensagem = paste0(
+                    "Falha ao executar Moran's I com a simulação condicional ",
+                    "à área observada."
+                  )))
+    }
+    teste <- list(statistic = moran_i, p.value = valor_p,
+                  simulated = simulados)
     interpretacao <- if (valor_p < 0.05 && moran_i > 0) {
-      "Há autocorrelação espacial positiva: células vizinhas tendem a ter contagens de serviços semelhantes (agrupamento)."
+      "Há autocorrelação espacial positiva: células vizinhas tendem a ter densidades de serviços semelhantes (agrupamento)."
     } else if (valor_p < 0.05 && moran_i < 0) {
-      "Há autocorrelação espacial negativa: células vizinhas tendem a ter contagens de serviços distintas (dispersão)."
+      "Há autocorrelação espacial negativa: células vizinhas tendem a ter densidades de serviços distintas (dispersão)."
     } else {
-      "Não há evidência de autocorrelação espacial significativa na contagem de serviços por célula."
+      "Não há evidência de autocorrelação espacial significativa na densidade de serviços por célula."
     }
     return(list(
       executado = TRUE, metodo = "grade_hex", celula_m = celula_m,
       moran_i = round(moran_i, 4), valor_p = round(valor_p, 4),
-      n_celulas = nrow(ocupadas), interpretacao = interpretacao,
+      n_celulas = nrow(grade),
+      n_celulas_ocupadas = sum(grade$n_servicos > 0),
+      variavel = "densidade_por_km2",
+      metodo_p = "Monte Carlo bilateral condicional à área",
+      nsim = sum(is.finite(simulados)), seed = seed,
+      interpretacao = interpretacao,
       objeto = teste
     ))
   }
 
   # --- Versão DIAGNÓSTICA: Moran sobre a distância radial ----------------------
-  chave <- sprintf("%.6f|%.6f", resultado$longitude, resultado$latitude)
-  dup   <- duplicated(chave)
-  d     <- resultado[!dup, , drop = FALSE]
-  n_dup <- sum(dup)
-  if (n_dup > 0) {
-    message("  moran: removidas ", n_dup, " ocorrências com coordenadas ",
-            "idênticas para estabilizar o teste (restam ", nrow(d), " pontos).")
+  if (!is.data.frame(resultado) ||
+      !all(c("longitude", "latitude", "distancia_m") %in% names(resultado))) {
+    return(list(executado = FALSE,
+                mensagem = "Resultado sem coordenadas ou distâncias para Moran's I."))
   }
+  lon <- suppressWarnings(as.numeric(resultado$longitude))
+  lat <- suppressWarnings(as.numeric(resultado$latitude))
+  distancia <- gs_distancias_resultado(resultado)
+  validos <- is.finite(lon) & is.finite(lat) & is.finite(distancia)
+  d <- resultado[validos, , drop = FALSE]
+  d$longitude <- lon[validos]
+  d$latitude <- lat[validos]
+  d$distancia_m <- distancia[validos]
+  chave <- sprintf("%.12f|%.12f", d$longitude, d$latitude)
+  dup   <- duplicated(chave)
+  d     <- d[!dup, , drop = FALSE]
+  n_dup <- sum(dup)
   if (nrow(d) < 4) {
     return(list(executado = FALSE,
                 mensagem = "Menos de 4 pontos distintos — número insuficiente para Moran's I."))
   }
-  coords <- as.matrix(d[, c("longitude", "latitude")])
-  nb <- spdep::knn2nb(spdep::knearneigh(coords, k = min(5, nrow(d) - 1)))
+  variancia <- stats::var(d$distancia_m)
+  if (!is.finite(variancia) || variancia <= 0) {
+    return(list(executado = FALSE,
+                mensagem = "Distâncias sem variância — Moran's I não é definido."))
+  }
+  coords <- tryCatch(
+    sf::st_coordinates(sf::st_transform(
+      sf::st_as_sf(d, coords = c("longitude", "latitude"),
+                   crs = gs_epsg$wgs84),
+      gs_epsg$oficial
+    )),
+    error = function(e) NULL
+  )
+  if (is.null(coords)) {
+    return(list(executado = FALSE,
+                mensagem = "Não foi possível projetar os pontos para Moran's I."))
+  }
+  nb <- tryCatch(
+    spdep::knn2nb(spdep::knearneigh(coords, k = min(5, nrow(d) - 1)),
+                  sym = TRUE),
+    error = function(e) NULL
+  )
+  graus <- if (is.null(nb)) integer(0) else spdep::card(nb)
+  if (length(graus) != nrow(d) || sum(graus) == 0 || any(graus == 0)) {
+    return(list(executado = FALSE,
+                mensagem = "Vizinhança inválida para Moran's I."))
+  }
   ncomp <- spdep::n.comp.nb(nb)
   avisos <- character(0)
   if (ncomp$nc > 1) {
     avisos <- c(avisos, sprintf(
       "Vizinhança com %d sub-grafo(s) desconexo(s); os resultados locais nesses sub-grafos não são confiáveis.",
       ncomp$nc))
-    message("  moran: ", avisos[length(avisos)])
   }
-  lw <- spdep::nb2listw(nb, style = "W", zero.policy = TRUE)
+  max_permutacoes <- if (nrow(d) <= 8) {
+    max(1, as.integer(factorial(nrow(d)) - 1))
+  } else {
+    nsim
+  }
+  nsim_efetivo <- min(nsim, max_permutacoes)
+  if (nsim_efetivo < nsim) {
+    avisos <- c(avisos, sprintf(
+      "Número de permutações reduzido de %d para %d para %d pontos.",
+      nsim, nsim_efetivo, nrow(d)
+    ))
+  }
+  lw <- tryCatch(spdep::nb2listw(nb, style = "W", zero.policy = FALSE),
+                 error = function(e) NULL)
+  if (is.null(lw)) {
+    return(list(executado = FALSE,
+                mensagem = "Não foi possível construir os pesos espaciais."))
+  }
   teste <- tryCatch(
-    spdep::moran.mc(d$distancia_m, lw, nsim = 999, zero.policy = TRUE),
+    gs_com_seed(seed, spdep::moran.mc(
+      d$distancia_m, lw, nsim = nsim_efetivo, zero.policy = FALSE,
+      alternative = "two.sided"
+    )),
     error = function(e) NULL
   )
-  if (is.null(teste)) {
+  if (is.null(teste) || !is.finite(unname(teste$statistic)) ||
+      !is.finite(teste$p.value)) {
     return(list(executado = FALSE,
                 mensagem = "Falha ao executar Moran's I (configuração de vizinhança inválida)."))
   }
@@ -224,6 +802,7 @@ gs_analise_moran <- function(resultado, celula_m = gs_celula_hex_m,
     valor_p   = round(valor_p, 4),
     n_pontos  = nrow(d),
     n_deduplicados = n_dup,
+    metodo_p = "Monte Carlo bilateral", nsim = nsim_efetivo, seed = seed,
     avisos    = c(avisos, paste0(
       "Moran aplicado à distância radial tem gradiente espacial construído ",
       "(distância a um único ponto) e tende a indicar agrupamento por ",
@@ -244,20 +823,30 @@ gs_analise_rede <- function(resultado, ponto) {
       mensagem = "Pacote 'osrm' não instalado. Instale com: install.packages('osrm')"
     ))
   }
-  options(osrm.server = gs_osrm_server(),
-              osrm.profile = gs_osrm_profile())
+  if (!is.data.frame(resultado) || nrow(resultado) == 0 ||
+      !all(c("longitude", "latitude", "camada", "nome") %in% names(resultado))) {
+    return(list(executado = FALSE,
+                mensagem = "Nenhum destino válido para consultar a rede viária."))
+  }
+  opcoes_anteriores <- options(
+    osrm.server = gs_osrm_server(), osrm.profile = gs_osrm_profile()
+  )
+  on.exit(options(opcoes_anteriores), add = TRUE)
   origem <- gs_osrm_input("origem", ponto$longitude, ponto$latitude)
-  destinos <- gs_osrm_input(as.character(seq_len(nrow(resultado))),
-                            resultado$longitude, resultado$latitude)
+  indices <- split(seq_len(nrow(resultado)),
+                   ceiling(seq_len(nrow(resultado)) / 99))
   if (nrow(resultado) > 200) {
     message("  rede viária: calculando distâncias para ", nrow(resultado),
             " destinos via OSRM (pode demorar)...")
   }
-  tab <- tryCatch(
-    osrm::osrmTable(src = origem, dst = destinos, measure = "distance"),
-    error = function(e) NULL
-  )
-  if (is.null(tab)) {
+  dist_rede_m <- tryCatch(unlist(lapply(indices, function(i) {
+    destinos <- gs_osrm_input(
+      as.character(i), resultado$longitude[i], resultado$latitude[i]
+    )
+    tab <- gs_consultar_tabela_osrm(origem, destinos)
+    gs_osrm_dist_m(tab$distances[1, ])
+  }), use.names = FALSE), error = function(e) NULL)
+  if (is.null(dist_rede_m) || length(dist_rede_m) != nrow(resultado)) {
     return(list(
       executado = FALSE,
       servidor  = gs_osrm_server(),
@@ -268,13 +857,19 @@ gs_analise_rede <- function(resultado, ponto) {
         "ou options(gs.osrm_server = 'http://...').")
     ))
   }
-  dist_rede_m <- gs_osrm_dist_m(tab$distances[1, ])
+  origem_sf <- sf::st_sfc(
+    sf::st_point(c(ponto$longitude, ponto$latitude)), crs = gs_epsg$wgs84
+  )
+  destinos_sf <- sf::st_as_sf(
+    resultado, coords = c("longitude", "latitude"), crs = gs_epsg$wgs84
+  )
+  dist_reta_m <- gs_distancias_s2(origem_sf, destinos_sf)
   out <- data.frame(
     camada            = resultado$camada,
     nome              = resultado$nome,
-    distancia_reta_m  = resultado$distancia_m,
-    distancia_rede_m  = dist_rede_m,
-    razao_rede_reta   = round(dist_rede_m / pmax(resultado$distancia_m, 1), 2),
+    distancia_reta_m  = round(dist_reta_m, 1),
+    distancia_rede_m  = round(dist_rede_m, 1),
+    razao_rede_reta   = round(dist_rede_m / pmax(dist_reta_m, 1), 2),
     stringsAsFactors  = FALSE
   )
   list(executado = TRUE, resultado = out)
@@ -288,78 +883,138 @@ gs_analise_rede <- function(resultado, ponto) {
 # Medidas robustas para distribuições assimétricas (comuns em distâncias):
 # mediana (destaque), P25/P75, IQR e CV além de média/desvio-padrão.
 gs_analise_acessibilidade <- function(resultado) {
-  resumo <- function(x) {
-    x <- x[!is.na(x)]
-    q25 <- unname(stats::quantile(x, 0.25))
-    q75 <- unname(stats::quantile(x, 0.75))
-    media <- mean(x)
-    sd <- stats::sd(x)
-    c(n = length(x), min = min(x), p25 = q25, mediana = unname(stats::median(x)),
-      media = media, p75 = q75, max = max(x), iqr = q75 - q25,
-      sd = sd, cv = round(100 * sd / max(media, 1e-9), 1))
+  incompleta <- gs_requer_amostra_completa(resultado, "acessibilidade_media")
+  if (!is.null(incompleta)) return(incompleta)
+  if (!is.data.frame(resultado) || !"distancia_m" %in% names(resultado)) {
+    return(list(executado = FALSE,
+                mensagem = "Resultado sem a coluna numérica 'distancia_m'."))
   }
-  geral <- as.data.frame(t(resumo(resultado$distancia_m)))
-  por_camada <- do.call(rbind, lapply(split(resultado, resultado$camada), function(d) {
-    data.frame(t(resumo(d$distancia_m)))
+  distancia <- gs_distancias_resultado(resultado)
+  medidas <- gs_resumo_distancias(distancia)
+  if (medidas[["n"]] == 0) {
+    return(list(executado = FALSE,
+                mensagem = "Nenhuma distância válida para analisar acessibilidade."))
+  }
+  validos <- is.finite(distancia)
+  dados <- resultado[validos, , drop = FALSE]
+  dados$distancia_m <- distancia[validos]
+  if (!"camada" %in% names(dados)) dados$camada <- "geral"
+  dados$camada <- as.character(dados$camada)
+  dados$camada[is.na(dados$camada) | !nzchar(dados$camada)] <- "(sem camada)"
+
+  geral <- as.data.frame(as.list(medidas), check.names = FALSE)
+  por_camada <- do.call(rbind, lapply(split(dados, dados$camada), function(d) {
+    data.frame(camada = d$camada[1],
+               as.list(gs_resumo_distancias(d$distancia_m)),
+               check.names = FALSE, row.names = NULL)
   }))
-  por_camada <- cbind(camada = rownames(por_camada), as.data.frame(por_camada))
   rownames(por_camada) <- NULL
   por_tipo <- NULL
-  if ("tipo_servico" %in% names(resultado) && !all(is.na(resultado$tipo_servico))) {
-    por_tipo <- do.call(rbind, lapply(split(resultado, resultado$tipo_servico), function(d) {
-      data.frame(t(resumo(d$distancia_m)))
+  if ("tipo_servico" %in% names(dados) && !all(is.na(dados$tipo_servico))) {
+    dados_tipo <- dados[!is.na(dados$tipo_servico) &
+                          nzchar(as.character(dados$tipo_servico)), , drop = FALSE]
+    por_tipo <- do.call(rbind, lapply(split(dados_tipo, dados_tipo$tipo_servico), function(d) {
+      data.frame(tipo_servico = as.character(d$tipo_servico[1]),
+                 as.list(gs_resumo_distancias(d$distancia_m)),
+                 check.names = FALSE, row.names = NULL)
     }))
-    por_tipo <- cbind(tipo_servico = rownames(por_tipo), as.data.frame(por_tipo))
-    rownames(por_tipo) <- NULL
+    if (!is.null(por_tipo)) rownames(por_tipo) <- NULL
   }
-  qs <- stats::quantile(resultado$distancia_m, c(0.25, 0.5, 0.75))
-  grafico_ecdf <- ggplot2::ggplot(resultado, ggplot2::aes(x = distancia_m)) +
+  qs <- unname(medidas[c("p25", "mediana", "p75")])
+  grafico_ecdf <- ggplot2::ggplot(dados, ggplot2::aes(x = distancia_m)) +
     ggplot2::stat_ecdf(geom = "step", color = "#2c7fb8", linewidth = 0.9) +
-    ggplot2::geom_vline(xintercept = unname(qs), linetype = "dashed",
+    ggplot2::geom_vline(xintercept = qs, linetype = "dashed",
                         color = "grey55") +
     ggplot2::labs(x = "Distância (m)", y = "Proporção acumulada de serviços",
                   title = "Curva acumulada das distâncias (ECDF)",
                   subtitle = "Linhas tracejadas: P25, mediana e P75") +
     ggplot2::theme_minimal()
-  list(geral = geral, por_camada = por_camada, por_tipo = por_tipo,
+  list(executado = TRUE, geral = geral, por_camada = por_camada,
+       por_tipo = por_tipo,
+       metodo_ic = if (medidas[["n"]] > 1) {
+         paste0(
+           "IC descritivo de 95% t de Student para a média, sob hipótese i.i.d.; ",
+           "não representa incerteza censitária dos dados administrativos"
+         )
+       } else {
+         "IC não calculado: menos de duas observações"
+       },
        grafico_ecdf = grafico_ecdf)
 }
 
 # --- Cobertura por buffer: área coberta pelos buffers dos serviços ------------
 # Calcula, por camada (e no geral), a área coberta pela união de buffers de
-# `raio_buffer_m` ao redor de cada serviço, comparada à área do casco convexo
-# (hull) dos pontos — uma medida simples de cobertura sem dados externos.
-gs_analise_cobertura <- function(resultado, ponto, raio_buffer_m = gs_raio_buffer_m) {
-  pts <- sf::st_as_sf(resultado, coords = c("longitude", "latitude"),
-                      crs = gs_epsg$wgs84)
-  pts_utm <- sf::st_transform(pts, gs_epsg$oficial)
-  # deduplica coordenadas (mesmo prédio) para acelerar as operações
-  coords <- round(sf::st_coordinates(pts_utm), 1)
-  pts_utm <- pts_utm[!duplicated(coords), , drop = FALSE]
-  if (nrow(pts_utm) == 0) {
+# `raio_buffer_m`, sempre limitada pelo buffer usado na consulta.
+gs_analise_cobertura <- function(resultado, ponto = NULL,
+                                 raio_buffer_m = gs_raio_buffer_m,
+                                 raio_m = NULL) {
+  dominio <- gs_dominio_consulta(resultado, ponto, raio_m)
+  if (!isTRUE(dominio$executado)) return(dominio)
+  raio_buffer_m <- suppressWarnings(as.numeric(raio_buffer_m)[1])
+  if (!is.finite(raio_buffer_m) || raio_buffer_m <= 0) {
+    return(list(executado = FALSE,
+                mensagem = "O raio dos buffers de cobertura deve ser positivo."))
+  }
+  if (!is.data.frame(resultado) || nrow(resultado) == 0 ||
+      !all(c("longitude", "latitude", "camada") %in% names(resultado))) {
     return(list(executado = FALSE, mensagem = "Nenhum ponto para calcular cobertura."))
   }
-  hull <- sf::st_convex_hull(sf::st_union(pts_utm))
-  area_hull <- as.numeric(sf::st_area(hull))
+
+  lon <- suppressWarnings(as.numeric(resultado$longitude))
+  lat <- suppressWarnings(as.numeric(resultado$latitude))
+  validos <- is.finite(lon) & is.finite(lat)
+  dados <- resultado[validos, , drop = FALSE]
+  dados$longitude <- lon[validos]
+  dados$latitude <- lat[validos]
+  if (nrow(dados) == 0) {
+    return(list(executado = FALSE, mensagem = "Nenhuma coordenada válida para cobertura."))
+  }
+  dados$camada <- as.character(dados$camada)
+  dados$camada[is.na(dados$camada) | !nzchar(dados$camada)] <- "(sem camada)"
+  pts_utm <- tryCatch(
+    sf::st_transform(sf::st_as_sf(dados, coords = c("longitude", "latitude"),
+                                  crs = gs_epsg$wgs84),
+                     gs_epsg$oficial),
+    error = function(e) NULL
+  )
+  if (is.null(pts_utm)) {
+    return(list(executado = FALSE,
+                mensagem = "Não foi possível projetar os pontos para cobertura."))
+  }
+  dentro <- lengths(sf::st_intersects(pts_utm, dominio$dominio)) > 0
+  pts_utm <- pts_utm[dentro, , drop = FALSE]
+  if (nrow(pts_utm) == 0) {
+    return(list(executado = FALSE,
+                mensagem = "Nenhum serviço está dentro do domínio da consulta."))
+  }
+
+  area_dominio <- as.numeric(sf::st_area(dominio$dominio))
+  calcula_area <- function(x) {
+    uniao <- sf::st_union(sf::st_buffer(sf::st_geometry(x), raio_buffer_m))
+    recorte <- suppressWarnings(sf::st_intersection(uniao, dominio$dominio))
+    if (length(recorte) == 0 || all(sf::st_is_empty(recorte))) return(0)
+    sum(as.numeric(sf::st_area(recorte)), na.rm = TRUE)
+  }
   por_camada <- lapply(split(seq_len(nrow(pts_utm)), pts_utm$camada), function(i) {
-    un <- sf::st_union(sf::st_buffer(pts_utm[i, , drop = FALSE], raio_buffer_m))
-    area <- as.numeric(sf::st_area(un))
-    area_int <- as.numeric(sf::st_area(sf::st_intersection(un, hull)))
+    area <- calcula_area(pts_utm[i, , drop = FALSE])
     data.frame(camada = pts_utm$camada[i[1]], n = length(i),
                area_coberta_km2 = round(area / 1e6, 2),
-               area_no_hull_km2 = round(area_int / 1e6, 2),
-               pct_hull = round(100 * area_int / max(area_hull, 1), 2))
+               area_no_dominio_km2 = round(area / 1e6, 2),
+               pct_dominio = round(100 * area / area_dominio, 2),
+               area_no_hull_km2 = round(area / 1e6, 2),
+               pct_hull = round(100 * area / area_dominio, 2))
   })
   por_camada <- do.call(rbind, por_camada)
   rownames(por_camada) <- NULL
-  un_todas <- sf::st_union(sf::st_buffer(pts_utm, raio_buffer_m))
-  area_todas <- as.numeric(sf::st_area(sf::st_intersection(un_todas, hull)))
+  area_todas <- calcula_area(pts_utm)
   list(
     executado = TRUE,
     raio_buffer_m = raio_buffer_m,
-    area_hull_km2 = round(area_hull / 1e6, 2),
+    raio_consulta_m = dominio$raio_m,
+    area_consulta_km2 = round(area_dominio / 1e6, 2),
+    area_hull_km2 = round(area_dominio / 1e6, 2),
     area_coberta_km2 = round(area_todas / 1e6, 2),
-    pct_cobertura = round(100 * area_todas / max(area_hull, 1), 2),
+    pct_cobertura = round(100 * area_todas / area_dominio, 2),
     por_camada = por_camada
   )
 }
@@ -369,9 +1024,24 @@ gs_analise_cobertura <- function(resultado, ponto, raio_buffer_m = gs_raio_buffe
 # gráfico ECDF que permite ver visualmente o percentil correspondente a cada
 # raio.
 gs_analise_raio_otimo <- function(resultado, p = c(0.5, 0.75, 0.9, 0.95)) {
-  q <- stats::quantile(resultado$distancia_m, probs = p)
+  incompleta <- gs_requer_amostra_completa(resultado, "raio_otimo")
+  if (!is.null(incompleta)) return(incompleta)
+  p <- suppressWarnings(as.numeric(p))
+  distancias <- gs_distancias_resultado(resultado)
+  distancias <- distancias[is.finite(distancias)]
+  if (length(distancias) == 0) {
+    return(list(executado = FALSE,
+                mensagem = "Nenhuma distância válida para estimar raios de cobertura."))
+  }
+  if (length(p) == 0 || any(!is.finite(p)) || any(p <= 0 | p >= 1)) {
+    return(list(executado = FALSE,
+                mensagem = "Os percentis devem estar estritamente entre 0 e 1."))
+  }
+  p <- sort(unique(p))
+  q <- stats::quantile(distancias, probs = p)
   percentis <- data.frame(percentil = names(q), raio_m = unname(round(q, 0)))
-  grafico <- ggplot2::ggplot(resultado, ggplot2::aes(x = distancia_m)) +
+  dados <- data.frame(distancia_m = distancias)
+  grafico <- ggplot2::ggplot(dados, ggplot2::aes(x = distancia_m)) +
     ggplot2::stat_ecdf(geom = "step", color = "#2c7fb8", linewidth = 0.9) +
     ggplot2::geom_hline(yintercept = as.numeric(p), linetype = "dashed",
                         color = "grey50") +
@@ -381,75 +1051,262 @@ gs_analise_raio_otimo <- function(resultado, p = c(0.5, 0.75, 0.9, 0.95)) {
                   title = "Raio necessário para alcançar X% dos serviços",
                   subtitle = "Vermelho pontilhado: percentis P50, P75, P90 e P95") +
     ggplot2::theme_minimal()
-  list(percentis = percentis, grafico = grafico)
+  list(executado = TRUE, percentis = percentis, grafico = grafico)
 }
 
 # --- Índice de Vizinho Mais Próximo (NNI) --------------------------------------
 # Razão entre a distância média observada ao vizinho mais próximo e a esperada
 # para um padrão aleatório. R < 1 → agrupado; R > 1 → disperso.
-gs_analise_nni <- function(resultado) {
-  pts_sf <- sf::st_as_sf(resultado, coords = c("longitude", "latitude"),
-                         crs = gs_epsg$wgs84)
-  d <- as.matrix(sf::st_distance(pts_sf))
-  diag(d) <- Inf
-  obs <- mean(apply(d, 1, min))
-  n <- nrow(pts_sf)
-  bbox_utm <- sf::st_bbox(sf::st_transform(pts_sf, gs_epsg$oficial))
-  area <- (bbox_utm["xmax"] - bbox_utm["xmin"]) * (bbox_utm["ymax"] - bbox_utm["ymin"])
+gs_analise_nni <- function(resultado, ponto = NULL, raio_m = NULL,
+                           nsim = 199, seed = 123) {
+  dominio <- gs_dominio_consulta(resultado, ponto, raio_m)
+  if (!isTRUE(dominio$executado)) return(dominio)
+  nsim <- suppressWarnings(as.integer(nsim)[1])
+  seed_valido <- is.null(seed) ||
+    (length(seed) > 0 && is.finite(suppressWarnings(as.numeric(seed)[1])))
+  if (!is.finite(nsim) || nsim < 0 || !seed_valido) {
+    return(list(executado = FALSE,
+                mensagem = "`nsim` deve ser não negativo e `seed`, um inteiro válido."))
+  }
+  if (!is.data.frame(resultado) ||
+      !all(c("longitude", "latitude") %in% names(resultado))) {
+    return(list(executado = FALSE,
+                mensagem = "Resultado sem coordenadas para calcular o NNI."))
+  }
+  lon <- suppressWarnings(as.numeric(resultado$longitude))
+  lat <- suppressWarnings(as.numeric(resultado$latitude))
+  validos <- is.finite(lon) & is.finite(lat)
+  dados <- resultado[validos, , drop = FALSE]
+  dados$longitude <- lon[validos]
+  dados$latitude <- lat[validos]
+  if (nrow(dados) < 2) {
+    return(list(executado = FALSE,
+                mensagem = "São necessários ao menos 2 pontos válidos para o NNI."))
+  }
+  pts_utm <- tryCatch(
+    sf::st_transform(sf::st_as_sf(dados, coords = c("longitude", "latitude"),
+                                  crs = gs_epsg$wgs84),
+                     gs_epsg$oficial),
+    error = function(e) NULL
+  )
+  if (is.null(pts_utm)) {
+    return(list(executado = FALSE,
+                mensagem = "Não foi possível projetar os pontos para o NNI."))
+  }
+  dentro <- lengths(sf::st_intersects(pts_utm, dominio$dominio)) > 0
+  n_fora <- sum(!dentro)
+  pts_utm <- pts_utm[dentro, , drop = FALSE]
+  coords <- sf::st_coordinates(pts_utm)
+  duplicados <- duplicated(as.data.frame(coords))
+  n_dup <- sum(duplicados)
+  coords <- coords[!duplicados, , drop = FALSE]
+  n <- nrow(coords)
+  if (n < 2) {
+    return(list(executado = FALSE,
+                mensagem = "Menos de 2 localizações distintas no domínio para o NNI.",
+                n_deduplicados = n_dup))
+  }
+
+  distancias <- as.matrix(stats::dist(coords))
+  diag(distancias) <- Inf
+  obs <- mean(apply(distancias, 1, min))
+  area <- as.numeric(sf::st_area(dominio$dominio))
+  if (!is.finite(obs) || !is.finite(area) || area <= 0) {
+    return(list(executado = FALSE,
+                mensagem = "Distâncias ou área do domínio inválidas para o NNI."))
+  }
   esperado <- 0.5 * sqrt(area / n)
   se <- 0.26136 * sqrt(area / n^2)
-  R <- obs / esperado
-  z <- (obs - esperado) / se
-  pvalor <- 2 * stats::pnorm(-abs(z))
-  interpretacao <- if (R < 0.5) "Fortemente agrupado" else
-                   if (R < 1) "Agrupado" else
-                   if (R < 1.5) "Aleatório/disperso" else "Disperso (uniforme)"
+  R_analitico <- obs / esperado
+  z <- if (is.finite(se) && se > 0) (obs - esperado) / se else NA_real_
+  pvalor <- if (is.finite(z)) 2 * stats::pnorm(-abs(z)) else NA_real_
+  metodo_p <- "aproximação normal"
+  esperado_mc <- NA_real_
+
+  if (nsim >= 19 && n <= 500) {
+    simulados <- tryCatch(gs_com_seed(seed, replicate(nsim, {
+      amostra <- suppressWarnings(sf::st_sample(
+        dominio$dominio, size = n, type = "random", exact = TRUE
+      ))
+      xy <- sf::st_coordinates(amostra)
+      dm <- as.matrix(stats::dist(xy))
+      diag(dm) <- Inf
+      mean(apply(dm, 1, min))
+    })), error = function(e) NULL)
+    if (!is.null(simulados) && all(is.finite(simulados))) {
+      esperado_mc <- mean(simulados)
+      desvio_mc <- stats::sd(simulados)
+      if (is.finite(desvio_mc) && desvio_mc > 0) {
+        z <- (obs - esperado_mc) / desvio_mc
+      }
+      p_inferior <- (1 + sum(simulados <= obs)) / (nsim + 1)
+      p_superior <- (1 + sum(simulados >= obs)) / (nsim + 1)
+      pvalor <- min(1, 2 * min(p_inferior, p_superior))
+      metodo_p <- "Monte Carlo bilateral na janela observacional"
+    }
+  }
+  referencia <- if (is.finite(esperado_mc)) esperado_mc else esperado
+  R <- obs / referencia
+  interpretacao <- if (is.finite(pvalor) && pvalor < 0.05 && obs < referencia) {
+    "Agrupado"
+  } else if (is.finite(pvalor) && pvalor < 0.05 && obs > referencia) {
+    "Regular/inibido"
+  } else {
+    "Compatível com aleatoriedade espacial"
+  }
+  avisos <- character(0)
+  if (n_dup > 0) {
+    avisos <- c(avisos, sprintf(
+      "%d ocorrência(s) co-localizada(s) foram removidas para o padrão pontual simples.",
+      n_dup))
+  }
+  if (n_fora > 0) {
+    avisos <- c(avisos, sprintf(
+      "%d ponto(s) fora do buffer da consulta foram ignorados.", n_fora))
+  }
+  if (!grepl("Monte Carlo", metodo_p, fixed = TRUE)) {
+    avisos <- c(avisos,
+                "P-valor analítico sem correção explícita do efeito de borda.")
+  }
   list(
     executado = TRUE, n = n,
+    n_deduplicados = n_dup,
     distancia_observada_m = round(obs, 1),
-    distancia_esperada_m = round(esperado, 1),
-    indice_nni = round(R, 3), z = round(z, 2),
+    distancia_esperada_m = round(referencia, 1),
+    distancia_esperada_analitica_m = round(esperado, 1),
+    distancia_esperada_mc_m = round(esperado_mc, 1),
+    indice_nni = round(R, 3), indice_nni_analitico = round(R_analitico, 3),
+    z = round(z, 2),
     valor_p = round(pvalor, 4), area_km2 = round(area / 1e6, 2),
+    metodo_p = metodo_p, nsim = if (grepl("Monte Carlo", metodo_p)) nsim else 0L,
+    seed = seed, tipo_janela = dominio$tipo_distancia,
     interpretacao = interpretacao,
-    avisos = c(
-      "O NNI usa a área da caixa envolvente (bbox) dos pontos; pontos próximos à borda sofrem efeito de borda, o que tende a subestimar a dispersão."
-    )
+    avisos = avisos
   )
 }
 
 # --- Grade hexagonal de contagens (apoio para LISA / Getis-Ord) ----------------
-gs_grade_hex <- function(resultado, celula_m = gs_celula_hex_m) {
-  pts <- sf::st_as_sf(resultado, coords = c("longitude", "latitude"),
-                      crs = gs_epsg$wgs84)
-  pts_utm <- sf::st_transform(pts, gs_epsg$oficial)
-  bbox <- sf::st_bbox(pts_utm)
-  bbox <- bbox + c(-celula_m, -celula_m, celula_m, celula_m)
-  grade <- sf::st_make_grid(bbox, cellsize = celula_m, square = FALSE)
-  grade_sf <- sf::st_sf(geometry = grade)
-  idx <- sf::st_intersects(grade_sf, pts_utm)
-  grade_sf$n_servicos <- lengths(idx)
-  grade_sf$camadas <- vapply(idx, function(i) {
-    if (length(i) == 0) NA_character_
-    else paste(sort(unique(pts_utm$camada[i])), collapse = ", ")
+gs_grade_hex <- function(resultado, celula_m = gs_celula_hex_m,
+                         ponto = NULL, raio_m = NULL) {
+  dominio <- gs_dominio_consulta(resultado, ponto, raio_m)
+  if (!isTRUE(dominio$executado)) return(dominio)
+  celula_m <- suppressWarnings(as.numeric(celula_m)[1])
+  if (!is.finite(celula_m) || celula_m <= 0) {
+    return(list(executado = FALSE,
+                mensagem = "O tamanho da célula deve ser positivo."))
+  }
+
+  grade <- tryCatch(
+    sf::st_make_grid(dominio$dominio, cellsize = celula_m, square = FALSE),
+    error = function(e) NULL
+  )
+  if (is.null(grade) || length(grade) == 0) {
+    return(list(executado = FALSE,
+                mensagem = "Não foi possível construir a grade hexagonal."))
+  }
+  grade_sf <- sf::st_sf(celula_id = seq_along(grade), geometry = grade)
+  area_celula_m2 <- stats::setNames(
+    as.numeric(sf::st_area(grade_sf)), as.character(grade_sf$celula_id)
+  )
+  toca <- lengths(sf::st_intersects(grade_sf, dominio$dominio)) > 0
+  grade_sf <- grade_sf[toca, , drop = FALSE]
+  grade_sf <- tryCatch(
+    suppressWarnings(sf::st_intersection(
+      grade_sf, sf::st_sf(.dominio = 1L, geometry = dominio$dominio)
+    )),
+    error = function(e) NULL
+  )
+  if (is.null(grade_sf)) {
+    return(list(executado = FALSE,
+                mensagem = "Não foi possível recortar a grade pelo domínio."))
+  }
+  areas <- suppressWarnings(as.numeric(sf::st_area(grade_sf)))
+  grade_sf <- grade_sf[!sf::st_is_empty(grade_sf) & is.finite(areas) & areas > 0,
+                       , drop = FALSE]
+  grade_sf <- grade_sf[order(grade_sf$celula_id), , drop = FALSE]
+  if (nrow(grade_sf) == 0) {
+    return(list(executado = FALSE,
+                mensagem = "O domínio não contém células hexagonais válidas."))
+  }
+  grade_sf$area_observada_km2 <- as.numeric(sf::st_area(grade_sf)) / 1e6
+  grade_sf$fracao_area_observada <- pmin(
+    as.numeric(sf::st_area(grade_sf)) /
+      area_celula_m2[as.character(grade_sf$celula_id)],
+    1
+  )
+  grade_sf$n_servicos <- integer(nrow(grade_sf))
+  grade_sf$densidade_por_km2 <- numeric(nrow(grade_sf))
+  grade_sf$camadas <- rep(NA_character_, nrow(grade_sf))
+
+  if (!is.data.frame(resultado) || nrow(resultado) == 0) {
+    attr(grade_sf, "raio_m") <- dominio$raio_m
+    attr(grade_sf, "n_atribuicoes_ambiguas") <- 0L
+    return(grade_sf)
+  }
+  if (!all(c("longitude", "latitude") %in% names(resultado))) {
+    return(list(executado = FALSE,
+                mensagem = "Resultado sem coordenadas para preencher a grade."))
+  }
+  lon <- suppressWarnings(as.numeric(resultado$longitude))
+  lat <- suppressWarnings(as.numeric(resultado$latitude))
+  validos <- is.finite(lon) & is.finite(lat)
+  dados <- resultado[validos, , drop = FALSE]
+  dados$longitude <- lon[validos]
+  dados$latitude <- lat[validos]
+  if (nrow(dados) == 0) {
+    attr(grade_sf, "raio_m") <- dominio$raio_m
+    attr(grade_sf, "n_atribuicoes_ambiguas") <- 0L
+    return(grade_sf)
+  }
+  pts_utm <- tryCatch(
+    sf::st_transform(sf::st_as_sf(dados, coords = c("longitude", "latitude"),
+                                  crs = gs_epsg$wgs84),
+                     gs_epsg$oficial),
+    error = function(e) NULL
+  )
+  if (is.null(pts_utm)) {
+    return(list(executado = FALSE,
+                mensagem = "Não foi possível projetar os pontos da grade."))
+  }
+  candidatas <- sf::st_intersects(pts_utm, grade_sf)
+  atribuicao <- vapply(candidatas, function(i) {
+    if (length(i) == 0) NA_integer_ else i[1]
+  }, integer(1))
+  dentro <- !is.na(atribuicao)
+  grade_sf$n_servicos <- tabulate(atribuicao[dentro], nbins = nrow(grade_sf))
+  grade_sf$densidade_por_km2 <-
+    grade_sf$n_servicos / pmax(grade_sf$area_observada_km2, 1e-9)
+  camadas <- if ("camada" %in% names(pts_utm)) {
+    as.character(pts_utm$camada)
+  } else {
+    rep(NA_character_, nrow(pts_utm))
+  }
+  grade_sf$camadas <- vapply(seq_len(nrow(grade_sf)), function(i) {
+    valores <- sort(unique(camadas[dentro & atribuicao == i]))
+    valores <- valores[!is.na(valores) & nzchar(valores)]
+    if (length(valores) == 0) NA_character_ else paste(valores, collapse = ", ")
   }, character(1))
+  attr(grade_sf, "raio_m") <- dominio$raio_m
+  attr(grade_sf, "n_atribuicoes_ambiguas") <- sum(lengths(candidatas) > 1)
   grade_sf
 }
 
 # --- Mapa simples de contagens por célula --------------------------------------
 gs_mapa_grade <- function(grade, titulo) {
   ggplot2::ggplot(grade) +
-    ggplot2::geom_sf(ggplot2::aes(fill = n_servicos), color = "white",
+    ggplot2::geom_sf(ggplot2::aes(fill = densidade_por_km2), color = "white",
                      linewidth = 0.1) +
     ggplot2::scale_fill_viridis_c(na.value = "grey90") +
     gs_tema_mapa() +
-    ggplot2::labs(title = titulo, fill = "Nº de serviços")
+    ggplot2::labs(title = titulo, fill = "Serviços/km²")
 }
 
 # --- Mapa de classes (pontos quentes/frios ou LISA) ----------------------------
 gs_mapa_grade_classe <- function(grade, titulo) {
   cores <- c("ponto quente" = "#d7301f", "ponto frio" = "#0570b0",
-             "alto-alto" = "#d7301f", "baixo-baixo" = "#0570b0",
-             "não significativo" = "grey85")
+              "alto-alto" = "#d7301f", "baixo-baixo" = "#0570b0",
+              "alto-baixo" = "#fc8d59", "baixo-alto" = "#74add1",
+              "não significativo" = "grey85", "não avaliável" = "grey40")
   ggplot2::ggplot(grade) +
     ggplot2::geom_sf(ggplot2::aes(fill = classe), color = "white", linewidth = 0.1) +
     ggplot2::scale_fill_manual(values = cores) +
@@ -457,120 +1314,325 @@ gs_mapa_grade_classe <- function(grade, titulo) {
     ggplot2::labs(title = titulo, fill = "Classe")
 }
 
+gs_classificar_lisa <- function(valor_centrado, lag_espacial, p_ajustado,
+                                alpha = 0.05) {
+  significativo <- is.finite(p_ajustado) & p_ajustado < alpha &
+    is.finite(valor_centrado) & is.finite(lag_espacial) &
+    valor_centrado != 0 & lag_espacial != 0
+  classe <- rep("não significativo", length(valor_centrado))
+  classe[!is.finite(p_ajustado) | !is.finite(valor_centrado) |
+           !is.finite(lag_espacial)] <- "não avaliável"
+  classe[significativo & valor_centrado > 0 & lag_espacial > 0] <- "alto-alto"
+  classe[significativo & valor_centrado < 0 & lag_espacial < 0] <- "baixo-baixo"
+  classe[significativo & valor_centrado > 0 & lag_espacial < 0] <- "alto-baixo"
+  classe[significativo & valor_centrado < 0 & lag_espacial > 0] <- "baixo-alto"
+  classe
+}
+
 # --- Getis-Ord (G* local) — aglomerados quentes/frios — requer spdep ------------
-gs_analise_getis_ord <- function(resultado, celula_m = gs_celula_hex_m) {
+gs_analise_getis_ord <- function(resultado, celula_m = gs_celula_hex_m,
+                                 ponto = NULL, raio_m = NULL,
+                                 nsim = 499, seed = 123) {
   if (!requireNamespace("spdep", quietly = TRUE)) {
     return(list(executado = FALSE,
                 mensagem = "Pacote 'spdep' não instalado. Instale com: install.packages('spdep')"))
   }
-  grade <- gs_grade_hex(resultado, celula_m)
-  ocupadas <- grade[!is.na(grade$camadas), , drop = FALSE]
-  if (nrow(ocupadas) < 4) {
+  nsim <- suppressWarnings(as.integer(nsim)[1])
+  seed_valido <- is.null(seed) ||
+    (length(seed) > 0 && is.finite(suppressWarnings(as.numeric(seed)[1])))
+  if (!is.finite(nsim) || nsim < 19 || !seed_valido) {
     return(list(executado = FALSE,
-                mensagem = "Menos de 4 células com serviços para Getis-Ord."))
+                mensagem = "`nsim` deve ser >= 19 e `seed`, um inteiro válido."))
   }
-  nb <- spdep::poly2nb(sf::st_geometry(ocupadas), queen = TRUE)
-  lw <- spdep::nb2listw(nb, style = "W", zero.policy = TRUE)
-  gi <- tryCatch(spdep::localG(ocupadas$n_servicos, lw, zero.policy = TRUE),
+  grade <- gs_grade_hex(resultado, celula_m, ponto = ponto, raio_m = raio_m)
+  if (!inherits(grade, "sf")) return(grade)
+  if (nrow(grade) < 4) {
+    return(list(executado = FALSE,
+                mensagem = "Menos de 4 células no domínio para Getis-Ord."))
+  }
+  x <- as.numeric(grade$densidade_por_km2)
+  variancia <- stats::var(x)
+  if (!is.finite(variancia) || variancia <= 0) {
+    return(list(executado = FALSE,
+                mensagem = "Densidades sem variância — Getis-Ord G* não é definido."))
+  }
+  nb <- tryCatch(spdep::poly2nb(sf::st_geometry(grade), queen = TRUE),
+                 error = function(e) NULL)
+  graus <- if (is.null(nb)) integer(0) else spdep::card(nb)
+  if (length(graus) != nrow(grade) || sum(graus) == 0 || any(graus == 0)) {
+    return(list(executado = FALSE,
+                mensagem = "Vizinhança da grade inválida ou com células isoladas."))
+  }
+  nb_gstar <- spdep::include.self(nb)
+  lw <- tryCatch(spdep::nb2listw(nb_gstar, style = "B", zero.policy = FALSE),
+                 error = function(e) NULL)
+  if (is.null(lw)) {
+    return(list(executado = FALSE,
+                mensagem = "Não foi possível construir os pesos de Getis-Ord."))
+  }
+  gi <- tryCatch(spdep::localG(x, lw, zero.policy = FALSE),
                  error = function(e) NULL)
   if (is.null(gi)) {
     return(list(executado = FALSE,
                 mensagem = "Falha ao executar Getis-Ord (pouca variância nas células)."))
   }
-  ocupadas$gi <- unname(attr(gi, "gstat"))
-  ocupadas$gi_z <- as.numeric(gi)
-  ocupadas$p_valor <- 2 * stats::pnorm(-abs(ocupadas$gi_z))
-  ocupadas$classe <- ifelse(ocupadas$gi_z > 1.96, "ponto quente",
-                     ifelse(ocupadas$gi_z < -1.96, "ponto frio",
-                            "não significativo"))
+  internos <- attr(gi, "internals")
+  grade$gi <- if (!is.null(internos) && "G*i" %in% colnames(internos)) {
+    as.numeric(internos[, "G*i"])
+  } else {
+    rep(NA_real_, nrow(grade))
+  }
+  grade$gi_z <- as.numeric(gi)
+  if (!any(is.finite(grade$gi_z))) {
+    return(list(executado = FALSE,
+                mensagem = "Getis-Ord G* sem variância local definida."))
+  }
+  gi_simulados <- tryCatch({
+    taxas <- gs_simular_taxas_area(
+      grade$n_servicos, grade$area_observada_km2, nsim, seed
+    )
+    vapply(seq_len(nsim), function(i) {
+      tryCatch(as.numeric(spdep::localG(
+        taxas[, i], lw, zero.policy = FALSE
+      )), error = function(e) rep(NA_real_, nrow(grade)))
+    }, numeric(nrow(grade)))
+  }, error = function(e) NULL)
+  if (is.null(gi_simulados)) {
+    return(list(executado = FALSE,
+                mensagem = "Falha na simulação de referência do Getis-Ord G*."))
+  }
+  grade$p_valor <- gs_pvalores_locais_mc(grade$gi_z, gi_simulados)
+  grade$p_ajustado <- gs_ajustar_p_finitos(grade$p_valor, metodo = "BH")
+  grade$p_valor_ajustado <- grade$p_ajustado
+  grade$classe <- rep("não significativo", nrow(grade))
+  grade$classe[!is.finite(grade$p_ajustado) | !is.finite(grade$gi_z)] <-
+    "não avaliável"
+  grade$classe[is.finite(grade$p_ajustado) & grade$p_ajustado < 0.05 &
+                  grade$gi_z > 0] <- "ponto quente"
+  grade$classe[is.finite(grade$p_ajustado) & grade$p_ajustado < 0.05 &
+                  grade$gi_z < 0] <- "ponto frio"
   list(executado = TRUE, celula_m = celula_m,
-       grade = ocupadas,
-       avisos = "P-valores locais não corrigidos para múltiplos testes; trate os resultados como exploratórios.",
-       mapa = gs_mapa_grade_classe(ocupadas, "Getis-Ord (G*) por célula"))
+       grade = grade, variavel = "densidade_por_km2",
+       inclui_self = TRUE, correcao_p = "BH", nsim = nsim, seed = seed,
+       metodo_p = "Monte Carlo bilateral condicional à área",
+       avisos = paste0(
+         "P-valores de Monte Carlo condicionais à área, ajustados por ",
+         "Benjamini-Hochberg; a análise permanece exploratória."
+       ),
+       mapa = gs_mapa_grade_classe(grade, "Getis-Ord (G*) por célula"))
 }
 
 # --- LISA (Moran local) — aglomerados alto-alto / baixo-baixo — requer spdep ----
-gs_analise_lisa <- function(resultado, celula_m = gs_celula_hex_m) {
+gs_analise_lisa <- function(resultado, celula_m = gs_celula_hex_m,
+                            ponto = NULL, raio_m = NULL,
+                            nsim = 499, seed = 123) {
   if (!requireNamespace("spdep", quietly = TRUE)) {
     return(list(executado = FALSE,
                 mensagem = "Pacote 'spdep' não instalado. Instale com: install.packages('spdep')"))
   }
-  grade <- gs_grade_hex(resultado, celula_m)
-  ocupadas <- grade[!is.na(grade$camadas), , drop = FALSE]
-  if (nrow(ocupadas) < 4) {
+  nsim <- suppressWarnings(as.integer(nsim)[1])
+  seed_valido <- is.null(seed) ||
+    (length(seed) > 0 && is.finite(suppressWarnings(as.numeric(seed)[1])))
+  if (!is.finite(nsim) || nsim < 19 || !seed_valido) {
     return(list(executado = FALSE,
-                mensagem = "Menos de 4 células com serviços para LISA."))
+                mensagem = "`nsim` deve ser >= 19 e `seed`, um inteiro válido."))
   }
-  nb <- spdep::poly2nb(sf::st_geometry(ocupadas), queen = TRUE)
-  lw <- spdep::nb2listw(nb, style = "W", zero.policy = TRUE)
-  lm <- tryCatch(spdep::localmoran(ocupadas$n_servicos, lw, zero.policy = TRUE),
+  grade <- gs_grade_hex(resultado, celula_m, ponto = ponto, raio_m = raio_m)
+  if (!inherits(grade, "sf")) return(grade)
+  if (nrow(grade) < 4) {
+    return(list(executado = FALSE,
+                mensagem = "Menos de 4 células no domínio para LISA."))
+  }
+  x <- as.numeric(grade$densidade_por_km2)
+  variancia <- stats::var(x)
+  if (!is.finite(variancia) || variancia <= 0) {
+    return(list(executado = FALSE,
+                mensagem = "Densidades sem variância — LISA não é definido."))
+  }
+  nb <- tryCatch(spdep::poly2nb(sf::st_geometry(grade), queen = TRUE),
+                 error = function(e) NULL)
+  graus <- if (is.null(nb)) integer(0) else spdep::card(nb)
+  if (length(graus) != nrow(grade) || sum(graus) == 0 || any(graus == 0)) {
+    return(list(executado = FALSE,
+                mensagem = "Vizinhança da grade inválida ou com células isoladas."))
+  }
+  lw <- tryCatch(spdep::nb2listw(nb, style = "W", zero.policy = FALSE),
+                 error = function(e) NULL)
+  if (is.null(lw)) {
+    return(list(executado = FALSE,
+                mensagem = "Não foi possível construir os pesos do LISA."))
+  }
+  lm <- tryCatch(spdep::localmoran(x, lw, zero.policy = FALSE,
+                                   alternative = "two.sided"),
                  error = function(e) NULL)
   if (is.null(lm)) {
     return(list(executado = FALSE,
                 mensagem = "Falha ao executar LISA (pouca variância nas células)."))
   }
-  ocupadas$lisa_i <- lm[, "Ii"]
-  ocupadas$lisa_z <- lm[, "Z.Ii"]
-  ocupadas$p_valor <- lm[, "Pr(z != E(Ii))"]
-  ocupadas$classe <- ifelse(ocupadas$lisa_z > 1.96 & ocupadas$p_valor < 0.05,
-                            "alto-alto",
-                     ifelse(ocupadas$lisa_z < -1.96 & ocupadas$p_valor < 0.05,
-                            "baixo-baixo", "não significativo"))
+  grade$lisa_i <- as.numeric(lm[, "Ii"])
+  grade$lisa_z <- as.numeric(lm[, "Z.Ii"])
+  lisa_simulados <- tryCatch({
+    taxas <- gs_simular_taxas_area(
+      grade$n_servicos, grade$area_observada_km2, nsim, seed
+    )
+    vapply(seq_len(nsim), function(i) {
+      tryCatch(as.numeric(spdep::localmoran(
+        taxas[, i], lw, zero.policy = FALSE,
+        alternative = "two.sided"
+      )[, "Ii"]), error = function(e) rep(NA_real_, nrow(grade)))
+    }, numeric(nrow(grade)))
+  }, error = function(e) NULL)
+  if (is.null(lisa_simulados)) {
+    return(list(executado = FALSE,
+                mensagem = "Falha na simulação de referência do LISA."))
+  }
+  grade$p_valor <- gs_pvalores_locais_mc(grade$lisa_i, lisa_simulados)
+  grade$p_ajustado <- gs_ajustar_p_finitos(grade$p_valor, metodo = "BH")
+  grade$p_valor_ajustado <- grade$p_ajustado
+  grade$valor_centrado <- x - mean(x)
+  grade$lag_espacial <- tryCatch(as.numeric(spdep::lag.listw(
+    lw, grade$valor_centrado, zero.policy = FALSE
+  )), error = function(e) NULL)
+  if (is.null(grade$lag_espacial) ||
+      !any(is.finite(grade$lag_espacial))) {
+    return(list(executado = FALSE,
+                mensagem = "Não foi possível calcular o lag espacial do LISA."))
+  }
+  grade$classe <- gs_classificar_lisa(
+    grade$valor_centrado, grade$lag_espacial, grade$p_ajustado
+  )
   list(executado = TRUE, celula_m = celula_m,
-       grade = ocupadas,
-       avisos = "P-valores locais não corrigidos para múltiplos testes; trate os resultados como exploratórios.",
-       mapa = gs_mapa_grade_classe(ocupadas, "LISA por célula"))
+       grade = grade, variavel = "densidade_por_km2", correcao_p = "BH",
+       nsim = nsim, seed = seed,
+       metodo_p = "Monte Carlo bilateral condicional à área",
+       avisos = paste0(
+         "P-valores de Monte Carlo condicionais à área, ajustados por ",
+         "Benjamini-Hochberg; a análise permanece exploratória."
+       ),
+       mapa = gs_mapa_grade_classe(grade, "LISA por célula"))
 }
 
 # --- Função K de Ripley — multiescala — requer spatstat -------------------------
-gs_analise_ripley_k <- function(resultado, rmax_m = NULL) {
-  if (!requireNamespace("spatstat", quietly = TRUE)) {
+gs_analise_ripley_k <- function(resultado, rmax_m = NULL, ponto = NULL,
+                                raio_m = NULL) {
+  if (!requireNamespace("spatstat.geom", quietly = TRUE) ||
+      !requireNamespace("spatstat.explore", quietly = TRUE)) {
     return(list(executado = FALSE,
-                mensagem = "Pacote 'spatstat' não instalado. Instale com: install.packages('spatstat')"))
+                mensagem = paste0(
+                  "Pacotes 'spatstat.geom' e 'spatstat.explore' não instalados. ",
+                  "Instale com: install.packages('spatstat')"
+                )))
+  }
+  dominio <- gs_dominio_consulta(resultado, ponto, raio_m)
+  if (!isTRUE(dominio$executado)) return(dominio)
+  if (!is.data.frame(resultado) || nrow(resultado) < 4 ||
+      !all(c("longitude", "latitude") %in% names(resultado))) {
+    return(list(executado = FALSE,
+                mensagem = "São necessários ao menos 4 pontos para a função K."))
   }
   pts_sf <- sf::st_as_sf(resultado, coords = c("longitude", "latitude"),
-                         crs = gs_epsg$wgs84)
+                          crs = gs_epsg$wgs84)
   pts_utm <- sf::st_transform(pts_sf, gs_epsg$oficial)
   coords <- sf::st_coordinates(pts_utm)
-  bb <- sf::st_bbox(pts_utm)
-  win <- spatstat.geom::owin(xrange = c(bb["xmin"], bb["xmax"]),
-                             yrange = c(bb["ymin"], bb["ymax"]))
-  ppp <- spatstat.geom::ppp(x = coords[, 1], y = coords[, 2], window = win)
-  dup <- spatstat.geom::duplicated.ppp(ppp)
-  if (any(dup)) {
-    message("  ripley_k: removidos ", sum(dup), " pontos duplicados.")
-    ppp <- ppp[!dup]
+  win <- tryCatch(
+    spatstat.geom::as.owin(sf::st_geometry(dominio$dominio)),
+    error = function(e) NULL
+  )
+  if (is.null(win)) {
+    return(list(executado = FALSE,
+                mensagem = "Não foi possível converter a janela observacional para a função K."))
   }
-  if (ppp$n < 4) {
+  dentro <- spatstat.geom::inside.owin(coords[, 1], coords[, 2], w = win)
+  n_fora <- sum(!dentro)
+  coords <- coords[dentro, , drop = FALSE]
+  if (nrow(coords) < 4) {
+    return(list(executado = FALSE,
+                mensagem = "Menos de 4 pontos dentro do domínio da consulta."))
+  }
+  dup <- duplicated(as.data.frame(coords))
+  n_dup <- sum(dup)
+  if (any(dup)) {
+    message("  ripley_k: removidos ", n_dup, " pontos duplicados.")
+    coords <- coords[!dup, , drop = FALSE]
+  }
+  if (nrow(coords) < 4) {
     return(list(executado = FALSE, mensagem = "Menos de 4 pontos para a função K."))
   }
-  K <- spatstat.explore::Kest(ppp, correction = "border", rmax = rmax_m)
+  ppp <- spatstat.geom::ppp(x = coords[, 1], y = coords[, 2], window = win)
+  if (!is.null(rmax_m)) {
+    rmax_m <- suppressWarnings(as.numeric(rmax_m)[1])
+    if (!is.finite(rmax_m) || rmax_m <= 0 || rmax_m > dominio$raio_m) {
+      return(list(executado = FALSE,
+                  mensagem = "`rmax_m` deve estar entre 0 e o raio da consulta."))
+    }
+  }
+  K <- spatstat.explore::Kest(
+    ppp, correction = c("border", "isotropic"), rmax = rmax_m
+  )
   df <- as.data.frame(K)
-  grafico <- ggplot2::ggplot(df, ggplot2::aes(x = r)) +
-    ggplot2::geom_line(ggplot2::aes(y = theo), color = "#d7301f", linetype = "dashed") +
-    ggplot2::geom_line(ggplot2::aes(y = .data[["border"]]), color = "#0570b0") +
-    ggplot2::labs(x = "Distância (m)", y = "K(r)",
-                  title = "Função K de Ripley",
-                  subtitle = "Azul: observada | Vermelho: esperada (aleatório)") +
+  coluna <- if ("iso" %in% names(df)) "iso" else "border"
+  df$l_menos_r <- sqrt(pmax(df[[coluna]], 0) / pi) - df$r
+  grafico <- ggplot2::ggplot(df, ggplot2::aes(x = r, y = l_menos_r)) +
+    ggplot2::geom_hline(yintercept = 0, color = "#d7301f", linetype = "dashed") +
+    ggplot2::geom_line(color = "#0570b0", linewidth = 0.9) +
+    ggplot2::labs(x = "Distância r (m)", y = "L(r) - r (m)",
+                  title = "Função K de Ripley transformada",
+                   subtitle = "Diagnóstico sem envelope: desvios de zero não implicam significância") +
     ggplot2::theme_minimal()
-  list(executado = TRUE, objeto = K, grafico = grafico)
+  list(executado = TRUE, n = ppp$n, n_fora_dominio = n_fora,
+       n_deduplicados = n_dup, raio_dominio_m = dominio$raio_m,
+       area_dominio_km2 = as.numeric(sf::st_area(dominio$dominio)) / 1e6,
+       tipo_janela = dominio$tipo_distancia,
+       correcao = coluna, curva = df, objeto = K, grafico = grafico,
+       avisos = paste0(
+         "Diagnóstico exploratório multiescala; sem envelope de simulação, ",
+         "a curva não constitui teste formal em cada distância."
+       ))
 }
 
 # --- KDE com banda estimada (Silverman) ----------------------------------------
 gs_analise_kde_banda <- function(resultado, ponto) {
-  bx <- MASS::bandwidth.nrd(resultado$longitude)
-  by <- MASS::bandwidth.nrd(resultado$latitude)
-  ggplot2::ggplot(resultado, ggplot2::aes(x = longitude, y = latitude)) +
+  incompleta <- gs_requer_amostra_completa(resultado, "kde_banda")
+  if (!is.null(incompleta)) return(incompleta)
+  if (!requireNamespace("MASS", quietly = TRUE)) {
+    return(list(executado = FALSE,
+                mensagem = "Pacote 'MASS' não instalado para estimar a banda da KDE."))
+  }
+  if (!is.data.frame(resultado) || nrow(resultado) < 3 ||
+      !all(c("longitude", "latitude") %in% names(resultado))) {
+    return(list(executado = FALSE,
+                mensagem = "São necessários ao menos 3 pontos para a KDE."))
+  }
+  pts <- tryCatch(sf::st_transform(
+    sf::st_as_sf(resultado, coords = c("longitude", "latitude"),
+                 crs = gs_epsg$wgs84), gs_epsg$oficial
+  ), error = function(e) NULL)
+  if (is.null(pts)) {
+    return(list(executado = FALSE,
+                mensagem = "Não foi possível projetar os pontos para a KDE."))
+  }
+  xy <- sf::st_coordinates(pts)
+  bx <- MASS::bandwidth.nrd(xy[, 1])
+  by <- MASS::bandwidth.nrd(xy[, 2])
+  if (!all(is.finite(c(bx, by))) || bx <= 0 || by <= 0) {
+    return(list(executado = FALSE,
+                mensagem = "Variação espacial insuficiente para estimar a banda da KDE."))
+  }
+  dados <- data.frame(x_m = xy[, 1], y_m = xy[, 2])
+  ggplot2::ggplot(dados, ggplot2::aes(x = x_m, y = y_m)) +
     ggplot2::stat_density_2d(ggplot2::aes(fill = ggplot2::after_stat(density)),
                              geom = "raster", contour = FALSE, alpha = 0.8,
                              h = c(bx, by)) +
     ggplot2::scale_fill_viridis_c() +
     ggplot2::geom_point(color = "#d7301f", size = 1) +
+    ggplot2::coord_equal() +
     ggplot2::theme_minimal() +
     ggplot2::labs(
       title = "Densidade de kernel (banda estimada)",
-      subtitle = sprintf("Ponto: %s | bw_x = %.6f°, bw_y = %.6f°",
-                         ponto$origem, bx, by)
+      subtitle = sprintf("Ponto: %s | banda x = %.0f m; banda y = %.0f m",
+                          ponto$origem, bx, by),
+      x = "Coordenada leste (m)", y = "Coordenada norte (m)",
+      fill = "Densidade"
     )
 }
 
@@ -581,139 +1643,300 @@ gs_baixar_distritos <- function(dir = gs_pasta_dados(), force = FALSE) {
   if (!file.exists(path) || force) {
     gs_baixar_camada(cam, dir = dir, csv = TRUE, verbose = TRUE)
   }
-  distritos <- sf::st_read(path, quiet = TRUE)
+  distritos <- gs_com_lock_arquivo(path, sf::st_read(path, quiet = TRUE))
   # Geometrias do GeoSampa podem ter auto-interseções; corrige antes do uso.
   sf::st_make_valid(distritos)
 }
 
-# --- Distribuição por distrito (cruzamento espacial) ---------------------------
-gs_analise_por_distrito <- function(resultado, dir = gs_pasta_dados()) {
+# --- Distribuição por distrito no domínio efetivamente observado -------------
+gs_distritos_no_dominio <- function(resultado, dir = gs_pasta_dados(),
+                                    ponto = NULL, raio_m = NULL) {
+  dominio <- gs_dominio_consulta(resultado, ponto, raio_m)
+  if (!isTRUE(dominio$executado)) return(dominio)
   distritos <- tryCatch(gs_baixar_distritos(dir), error = function(e) NULL)
+  if (is.null(distritos) || !inherits(distritos, "sf") ||
+      !"nm_distrito_municipal" %in% names(distritos)) {
+    return(list(executado = FALSE,
+                mensagem = "Não foi possível carregar a camada válida de distritos."))
+  }
+  if (!is.data.frame(resultado) ||
+      !all(c("longitude", "latitude") %in% names(resultado))) {
+    return(list(executado = FALSE,
+                mensagem = "Resultado sem coordenadas para o cruzamento distrital."))
+  }
+  distritos <- tryCatch(
+    sf::st_make_valid(sf::st_transform(distritos, gs_epsg$oficial)),
+    error = function(e) NULL
+  )
   if (is.null(distritos)) {
     return(list(executado = FALSE,
-                mensagem = "Não foi possível carregar a camada de distritos ",
-                "(verifique a conexão com o WFS do GeoSampa)."))
+                mensagem = "Não foi possível projetar os distritos."))
   }
-  distritos <- sf::st_transform(distritos, gs_epsg$wgs84)
-  pts <- sf::st_as_sf(resultado, coords = c("longitude", "latitude"),
-                      crs = gs_epsg$wgs84)
-  j <- sf::st_join(pts, distritos)
-  cont <- as.data.frame(table(j$nm_distrito_municipal))
-  names(cont) <- c("distrito", "n_servicos")
-  dist <- merge(distritos, cont, by.x = "nm_distrito_municipal",
-                by.y = "distrito", all.x = TRUE)
-  dist$n_servicos[is.na(dist$n_servicos)] <- 0
+  distritos$.area_original_m2 <- as.numeric(sf::st_area(distritos))
+  dist <- tryCatch(
+    suppressWarnings(sf::st_intersection(
+      distritos, sf::st_sf(.dominio = 1L, geometry = dominio$dominio)
+    )),
+    error = function(e) NULL
+  )
+  if (is.null(dist) || nrow(dist) == 0) {
+    return(list(executado = FALSE,
+                mensagem = "Nenhum distrito intersecta o domínio da consulta."))
+  }
   area <- as.numeric(sf::st_area(dist))
-  dist$area_km2 <- round(area / 1e6, 3)
-  dist$densidade_por_km2 <- round(dist$n_servicos / pmax(dist$area_km2, 0.001), 3)
+  validos_dist <- is.finite(area) & area > 0 & !sf::st_is_empty(dist)
+  dist <- dist[validos_dist, , drop = FALSE]
+  area <- area[validos_dist]
+  dist$area_observada_km2 <- area / 1e6
+  dist$area_km2 <- dist$area_observada_km2
+  dist$fracao_area_observada <- pmin(
+    area / pmax(dist$.area_original_m2, 1), 1
+  )
+
+  lon <- suppressWarnings(as.numeric(resultado$longitude))
+  lat <- suppressWarnings(as.numeric(resultado$latitude))
+  validos <- is.finite(lon) & is.finite(lat)
+  dados <- resultado[validos, , drop = FALSE]
+  dados$longitude <- lon[validos]
+  dados$latitude <- lat[validos]
+  pts <- sf::st_transform(
+    sf::st_as_sf(dados, coords = c("longitude", "latitude"),
+                 crs = gs_epsg$wgs84),
+    gs_epsg$oficial
+  )
+  candidatos <- sf::st_intersects(pts, dist)
+  atribuicao <- vapply(candidatos, function(i) {
+    if (length(i) == 0) return(NA_integer_)
+    i[order(as.character(dist$nm_distrito_municipal[i]))][1]
+  }, integer(1))
+  dist$n_servicos <- tabulate(atribuicao[!is.na(atribuicao)], nbins = nrow(dist))
+  dist$densidade_por_km2 <- dist$n_servicos / pmax(dist$area_observada_km2, 1e-9)
+  dist$.area_original_m2 <- NULL
+  dist$.dominio <- NULL
+  list(
+    executado = TRUE, distritos = dist,
+    n_sem_distrito = sum(is.na(atribuicao)),
+    n_atribuicoes_ambiguas = sum(lengths(candidatos) > 1),
+    raio_m = dominio$raio_m, tipo_janela = dominio$tipo_distancia
+  )
+}
+
+gs_analise_por_distrito <- function(resultado, dir = gs_pasta_dados(),
+                                    ponto = NULL, raio_m = NULL) {
+  cruzamento <- gs_distritos_no_dominio(resultado, dir, ponto, raio_m)
+  if (!isTRUE(cruzamento$executado)) return(cruzamento)
+  dist <- cruzamento$distritos
   mapa <- ggplot2::ggplot(dist) +
-    ggplot2::geom_sf(ggplot2::aes(fill = n_servicos), color = "white",
+    ggplot2::geom_sf(ggplot2::aes(fill = densidade_por_km2), color = "white",
                      linewidth = 0.15) +
     ggplot2::scale_fill_viridis_c(na.value = "grey90") +
     gs_tema_mapa() +
-    ggplot2::labs(title = "Serviços por distrito", fill = "Nº de serviços",
-                  caption = "Fonte: Prefeitura de São Paulo / GeoSampa")
-  list(executado = TRUE,
-       por_distrito = sf::st_drop_geometry(dist),
-       mapa = mapa)
+    ggplot2::labs(
+      title = "Densidade de serviços por distrito no domínio da consulta",
+      fill = "Serviços/km²",
+      caption = "Áreas distritais recortadas pelo raio da consulta"
+    )
+  list(executado = TRUE, raio_m = cruzamento$raio_m,
+       n_sem_distrito = cruzamento$n_sem_distrito,
+       n_atribuicoes_ambiguas = cruzamento$n_atribuicoes_ambiguas,
+       por_distrito = sf::st_drop_geometry(dist), mapa = mapa)
 }
 
-# --- Moran's I agregado por distrito (diagnóstico fino) ------------------------
-gs_analise_moran_distrital <- function(resultado, dir = gs_pasta_dados()) {
+# --- Moran's I da densidade nos distritos observados --------------------------
+gs_analise_moran_distrital <- function(resultado, dir = gs_pasta_dados(),
+                                       nsim = 999, seed = 123,
+                                       ponto = NULL, raio_m = NULL) {
   if (!requireNamespace("spdep", quietly = TRUE)) {
     return(list(executado = FALSE,
                 mensagem = "Pacote 'spdep' não instalado. Instale com: install.packages('spdep')"))
   }
-  distritos <- tryCatch(gs_baixar_distritos(dir), error = function(e) NULL)
-  if (is.null(distritos)) {
+  nsim <- suppressWarnings(as.integer(nsim)[1])
+  seed_valido <- is.null(seed) ||
+    (length(seed) > 0 && is.finite(suppressWarnings(as.numeric(seed)[1])))
+  if (!is.finite(nsim) || nsim < 19 || !seed_valido) {
     return(list(executado = FALSE,
-                mensagem = "Não foi possível carregar a camada de distritos ",
-                "(verifique a conexão com o WFS do GeoSampa)."))
+                mensagem = "`nsim` deve ser >= 19 e `seed`, um inteiro válido."))
   }
-  distritos <- sf::st_transform(distritos, gs_epsg$wgs84)
-  pts <- sf::st_as_sf(resultado, coords = c("longitude", "latitude"),
-                      crs = gs_epsg$wgs84)
-  j <- sf::st_join(pts, distritos)
-  cont <- as.data.frame(table(j$nm_distrito_municipal))
-  names(cont) <- c("distrito", "n_servicos")
-  dist <- merge(distritos, cont, by.x = "nm_distrito_municipal",
-                by.y = "distrito", all.x = TRUE)
-  dist$n_servicos[is.na(dist$n_servicos)] <- 0
-  if (nrow(dist) < 4 || stats::var(dist$n_servicos) == 0) {
+  cruzamento <- gs_distritos_no_dominio(resultado, dir, ponto, raio_m)
+  if (!isTRUE(cruzamento$executado)) return(cruzamento)
+  dist <- cruzamento$distritos
+  x <- dist$densidade_por_km2
+  variancia <- stats::var(x)
+  if (nrow(dist) < 4 || !is.finite(variancia) || variancia <= 0) {
     return(list(executado = FALSE,
-                mensagem = "Menos de 4 distritos ou sem variação de contagem ",
-                "— insuficiente para Moran distrital."))
+                mensagem = paste0(
+                  "Menos de 4 distritos observados ou sem variação de densidade ",
+                  "— insuficiente para Moran distrital."
+                )))
   }
-  nb <- spdep::poly2nb(sf::st_geometry(dist), queen = TRUE)
-  lw <- spdep::nb2listw(nb, style = "W", zero.policy = TRUE)
-  teste <- tryCatch(spdep::moran.test(dist$n_servicos, lw, zero.policy = TRUE),
-                    error = function(e) NULL)
-  if (is.null(teste)) {
+  nb <- tryCatch(spdep::poly2nb(sf::st_geometry(dist), queen = TRUE),
+                 error = function(e) NULL)
+  graus <- if (is.null(nb)) integer(0) else spdep::card(nb)
+  if (length(graus) != nrow(dist) || sum(graus) == 0 || any(graus == 0)) {
     return(list(executado = FALSE,
-                mensagem = "Falha ao executar Moran distrital (vizinhança inválida)."))
+                mensagem = "Vizinhança distrital inválida ou com distritos isolados."))
   }
-  lm <- spdep::localmoran(dist$n_servicos, lw, zero.policy = TRUE)
-  dist$lisa_i <- lm[, "Ii"]
-  dist$lisa_z <- lm[, "Z.Ii"]
-  dist$p_valor <- lm[, "Pr(z != E(Ii))"]
-  dist$classe <- ifelse(dist$lisa_z > 1.96 & dist$p_valor < 0.05, "alto-alto",
-                 ifelse(dist$lisa_z < -1.96 & dist$p_valor < 0.05, "baixo-baixo",
-                        "não significativo"))
+  lw <- tryCatch(spdep::nb2listw(nb, style = "W", zero.policy = FALSE),
+                 error = function(e) NULL)
+  if (is.null(lw)) {
+    return(list(executado = FALSE,
+                mensagem = "Não foi possível construir os pesos distritais."))
+  }
+  moran_i <- tryCatch(gs_moran_i(x, lw), error = function(e) NA_real_)
+  taxas_simuladas <- tryCatch(gs_simular_taxas_area(
+    dist$n_servicos, dist$area_observada_km2, nsim, seed
+  ), error = function(e) NULL)
+  moran_simulados <- if (is.null(taxas_simuladas)) NULL else
+    apply(taxas_simuladas, 2, function(x_sim) {
+      tryCatch(gs_moran_i(x_sim, lw), error = function(e) NA_real_)
+    })
+  valor_p <- if (is.null(moran_simulados)) NA_real_ else
+    gs_pvalor_mc_bilateral(moran_i, moran_simulados)
+  if (!is.finite(moran_i) || !is.finite(valor_p)) {
+    return(list(executado = FALSE,
+                mensagem = paste0(
+                  "Falha ao executar Moran distrital com a simulação ",
+                  "condicional à área observada."
+                )))
+  }
+  teste <- list(statistic = moran_i, p.value = valor_p,
+                simulated = moran_simulados)
+  lm <- tryCatch(spdep::localmoran(
+    x, lw, zero.policy = FALSE, alternative = "two.sided"
+  ), error = function(e) NULL)
+  if (is.null(lm)) {
+    return(list(executado = FALSE,
+                mensagem = "Falha ao executar LISA distrital."))
+  }
+  dist$lisa_i <- as.numeric(lm[, "Ii"])
+  dist$lisa_z <- as.numeric(lm[, "Z.Ii"])
+  lisa_simulados <- vapply(seq_len(nsim), function(i) {
+    tryCatch(as.numeric(spdep::localmoran(
+      taxas_simuladas[, i], lw, zero.policy = FALSE,
+      alternative = "two.sided"
+    )[, "Ii"]), error = function(e) rep(NA_real_, nrow(dist)))
+  }, numeric(nrow(dist)))
+  dist$p_valor <- gs_pvalores_locais_mc(dist$lisa_i, lisa_simulados)
+  dist$p_ajustado <- gs_ajustar_p_finitos(dist$p_valor, metodo = "BH")
+  dist$p_valor_ajustado <- dist$p_ajustado
+  dist$valor_centrado <- x - mean(x)
+  dist$lag_espacial <- tryCatch(as.numeric(spdep::lag.listw(
+    lw, dist$valor_centrado, zero.policy = FALSE
+  )), error = function(e) NULL)
+  if (is.null(dist$lag_espacial) || !any(is.finite(dist$lag_espacial))) {
+    return(list(executado = FALSE,
+                mensagem = "Não foi possível calcular o lag espacial distrital."))
+  }
+  dist$classe <- gs_classificar_lisa(
+    dist$valor_centrado, dist$lag_espacial, dist$p_ajustado
+  )
   mapa <- ggplot2::ggplot(dist) +
     ggplot2::geom_sf(ggplot2::aes(fill = classe), color = "white", linewidth = 0.15) +
     ggplot2::scale_fill_manual(
       values = c("alto-alto" = "#d7301f", "baixo-baixo" = "#0570b0",
-                 "não significativo" = "grey85")) +
+                 "alto-baixo" = "#fc8d59", "baixo-alto" = "#74add1",
+                 "não significativo" = "grey85", "não avaliável" = "grey40")) +
     gs_tema_mapa() +
-    ggplot2::labs(title = "Moran local por distrito (LISA)", fill = "Classe")
+    ggplot2::labs(
+      title = "Moran local da densidade distrital no domínio", fill = "Classe"
+    )
   list(executado = TRUE,
-       moran_i = unname(teste$estimate["Moran I statistic"]),
-       valor_p = teste$p.value,
+       moran_i = moran_i, valor_p = valor_p,
+       metodo_p = "Monte Carlo bilateral condicional à área",
+       nsim = sum(is.finite(moran_simulados)), seed = seed,
+       variavel = "densidade_por_km2", correcao_p_local = "BH",
+       n_distritos = nrow(dist), raio_m = cruzamento$raio_m,
+       tipo_janela = cruzamento$tipo_janela,
+       n_sem_distrito = cruzamento$n_sem_distrito,
+       n_atribuicoes_ambiguas = cruzamento$n_atribuicoes_ambiguas,
        por_distrito = sf::st_drop_geometry(dist),
-       mapa = mapa)
+       mapa = mapa, objeto = teste)
 }
 
 # --- Cobertura populacional: população dentro do raio de busca ------------------
 # Fontes: (a) `pop_layer` — objeto sf com coluna `populacao` e geometria
 # poligonal (ex.: setores censitários do IBGE unidos com os dados do Censo);
 # (b) `densidade_km2` — densidade média estimada (hab/km²) para estimativa.
-gs_analise_cobertura_populacional <- function(resultado, ponto, raio_m,
-                                              pop_layer = NULL,
-                                              densidade_km2 = NULL) {
+gs_analise_cobertura_populacional <- function(resultado, ponto = NULL,
+                                               raio_m = NULL,
+                                               pop_layer = NULL,
+                                               densidade_km2 = NULL) {
   if (is.null(pop_layer) && is.null(densidade_km2)) {
     return(list(executado = FALSE,
       mensagem = paste0(
         "Nenhuma fonte de população informada. Forneça `pop_layer` ",
-        "(objeto sf com coluna `populacao`, ex.: setores censitários do IBGE) ",
-        "ou `densidade_km2` (hab/km²) para estimar a população no raio.")))
+         "(objeto sf com coluna `populacao`, ex.: setores censitários do IBGE) ",
+         "ou `densidade_km2` (hab/km²) para estimar a população no raio.")))
   }
-  b <- sf::st_buffer(sf::st_transform(ponto$sf, gs_epsg$oficial), raio_m)
+  dominio <- gs_dominio_consulta(resultado, ponto, raio_m)
+  if (!isTRUE(dominio$executado)) return(dominio)
+  area_km2 <- as.numeric(sf::st_area(dominio$dominio)) / 1e6
   if (!is.null(densidade_km2)) {
-    area_km2 <- as.numeric(sf::st_area(b)) / 1e6
-    return(list(executado = TRUE, metodo = "densidade", raio_m = raio_m,
+    densidade_km2 <- suppressWarnings(as.numeric(densidade_km2)[1])
+    if (!is.finite(densidade_km2) || densidade_km2 < 0) {
+      return(list(executado = FALSE,
+                  mensagem = "`densidade_km2` deve ser um número não negativo."))
+    }
+    return(list(executado = TRUE, metodo = "densidade",
+                raio_m = dominio$raio_m,
                 area_km2 = round(area_km2, 2), densidade_km2 = densidade_km2,
                 populacao_estimada = round(densidade_km2 * area_km2)))
   }
-  if (!inherits(pop_layer, "sf")) stop("`pop_layer` deve ser um objeto sf.")
+  if (!inherits(pop_layer, "sf")) {
+    return(list(executado = FALSE,
+                mensagem = "`pop_layer` deve ser um objeto sf."))
+  }
   if (!"populacao" %in% names(pop_layer)) {
-    stop("`pop_layer` precisa de uma coluna chamada 'populacao'.")
+    return(list(executado = FALSE,
+                mensagem = "`pop_layer` precisa de uma coluna chamada 'populacao'."))
   }
-  pop_t <- sf::st_transform(pop_layer, gs_epsg$oficial)
-  pop_t$pop_id <- seq_len(nrow(pop_t))
-  inter <- sf::st_intersection(pop_t, b)
+  pop_t <- tryCatch(
+    sf::st_make_valid(sf::st_transform(pop_layer, gs_epsg$oficial)),
+    error = function(e) NULL
+  )
+  if (is.null(pop_t) || nrow(pop_t) == 0) {
+    return(list(executado = FALSE,
+                mensagem = "Não foi possível projetar a camada populacional."))
+  }
+  pop_t$.gs_pop_id <- seq_len(nrow(pop_t))
+  area_orig <- suppressWarnings(as.numeric(sf::st_area(pop_t)))
+  geometrias_validas <- !sf::st_is_empty(pop_t) & is.finite(area_orig) & area_orig > 0
+  pop_t <- pop_t[geometrias_validas, , drop = FALSE]
+  area_orig <- area_orig[geometrias_validas]
+  if (nrow(pop_t) == 0) {
+    return(list(executado = FALSE,
+                mensagem = "A camada populacional não possui geometrias com área válida."))
+  }
+  inter <- tryCatch(
+    suppressWarnings(sf::st_intersection(
+      pop_t, sf::st_sf(.dominio = 1L, geometry = dominio$dominio)
+    )),
+    error = function(e) NULL
+  )
+  if (is.null(inter)) {
+    return(list(executado = FALSE,
+                mensagem = "Falha ao cruzar população e buffer da consulta."))
+  }
   if (nrow(inter) == 0) {
-    return(list(executado = TRUE, metodo = "pop_layer", raio_m = raio_m,
-                area_km2 = 0, populacao_atendida = 0, n_unidades = 0))
+    return(list(executado = TRUE, metodo = "pop_layer",
+                raio_m = dominio$raio_m,
+                area_km2 = round(area_km2, 2), populacao_atendida = 0,
+                n_unidades = 0, n_populacao_na = 0))
   }
-  area_orig <- as.numeric(sf::st_area(pop_t))
-  inter$area_orig_m2 <- area_orig[inter$pop_id]
-  inter$area_piece_m2 <- as.numeric(sf::st_area(inter))
-  fracao <- pmin(inter$area_piece_m2 / pmax(inter$area_orig_m2, 1e-9), 1)
-  pop <- sum(inter$populacao * fracao)
-  area_km2 <- as.numeric(sf::st_area(b)) / 1e6
-  list(executado = TRUE, metodo = "pop_layer", raio_m = raio_m,
+  inter$area_orig_m2 <- area_orig[match(inter$.gs_pop_id, pop_t$.gs_pop_id)]
+  inter$area_piece_m2 <- suppressWarnings(as.numeric(sf::st_area(inter)))
+  fracao <- pmin(pmax(inter$area_piece_m2 / inter$area_orig_m2, 0), 1)
+  fracao[!is.finite(fracao)] <- 0
+  populacao <- suppressWarnings(as.numeric(as.character(inter$populacao)))
+  populacao_valida <- is.finite(populacao)
+  pop <- sum(ifelse(populacao_valida, populacao * fracao, 0), na.rm = TRUE)
+  n_pop_na <- length(unique(inter$.gs_pop_id[!populacao_valida]))
+  list(executado = TRUE, metodo = "pop_layer", raio_m = dominio$raio_m,
        area_km2 = round(area_km2, 2),
-       populacao_atendida = round(pop), n_unidades = nrow(inter))
+       area_intersectada_km2 = round(sum(inter$area_piece_m2, na.rm = TRUE) / 1e6, 2),
+       populacao_atendida = round(pop),
+       n_unidades = length(unique(inter$.gs_pop_id)),
+       n_populacao_na = n_pop_na)
 }
 
 # --- Função principal: executa as análises escolhidas -------------------------
@@ -721,8 +1944,8 @@ gs_analise_cobertura_populacional <- function(resultado, ponto, raio_m,
 # uma lista nomeada. Se `resultado` não for informado, calcula-o a partir dos
 # demais argumentos (mesmos de gs_servicos_proximos).
 gs_analise_servicos <- function(resultado = NULL, cep = NULL, coordenadas = NULL,
-                                camadas = NULL, raio_m = gs_raio_padrao_m,
-                                n_por_camada = NULL,
+                                 camadas = NULL, raio_m = gs_raio_padrao_m,
+                                 n_por_camada = NULL,
                                 tipo_distancia = c("geodesica", "euclidiana",
                                                    "haversine", "manhattan",
                                                    "rede_viaria"),
@@ -731,15 +1954,17 @@ gs_analise_servicos <- function(resultado = NULL, cep = NULL, coordenadas = NULL
                                          "raios_progressivos", "moran",
                                          "moran_distrital", "rede_viaria",
                                          "acessibilidade_media", "cobertura_buffer",
-                                         "raio_otimo", "nni", "getis_ord",
-                                         "lisa", "ripley_k", "por_distrito",
-                                         "cobertura_populacional")) {
+                                          "raio_otimo", "nni", "getis_ord",
+                                          "lisa", "ripley_k", "por_distrito",
+                                          "cobertura_populacional"),
+                                 dir = gs_caminho_dados(), pop_layer = NULL,
+                                 densidade_km2 = NULL) {
   tipo <- match.arg(tipo, several.ok = TRUE)
   if (is.null(resultado)) {
     resultado <- gs_servicos_proximos(
       cep = cep, coordenadas = coordenadas, camadas = camadas,
       raio_m = raio_m, n_por_camada = n_por_camada,
-      tipo_distancia = tipo_distancia
+      tipo_distancia = tipo_distancia, dir = dir
     )
   }
   ponto <- attr(resultado, "ponto")
@@ -749,25 +1974,55 @@ gs_analise_servicos <- function(resultado = NULL, cep = NULL, coordenadas = NULL
   raio <- attr(resultado, "raio_m")
   if (is.null(raio)) raio <- raio_m
 
+  segura <- function(expr, nome) {
+    tryCatch(
+      force(expr),
+      error = function(e) list(
+        executado = FALSE,
+        mensagem = paste0("Falha na análise '", nome, "': ", conditionMessage(e))
+      )
+    )
+  }
   saida <- list()
-  if ("descritivas" %in% tipo)            saida$descritivas        <- gs_analise_descritivas(resultado)
-  if ("vizinho_mais_proximo" %in% tipo)   saida$vizinho_mais_proximo <- gs_analise_vizinho(resultado)
-  if ("voronoi" %in% tipo)                saida$voronoi            <- gs_analise_voronoi(resultado, ponto)
-  if ("kde" %in% tipo)                    saida$kde                <- gs_analise_kde(resultado, ponto)
-  if ("kde_banda" %in% tipo)              saida$kde_banda          <- gs_analise_kde_banda(resultado, ponto)
-  if ("raios_progressivos" %in% tipo)     saida$raios_progressivos <- gs_analise_raios(resultado, ponto)
-  if ("moran" %in% tipo)                  saida$moran              <- gs_analise_moran(resultado)
-  if ("rede_viaria" %in% tipo)            saida$rede_viaria        <- gs_analise_rede(resultado, ponto)
-  if ("acessibilidade_media" %in% tipo)   saida$acessibilidade_media <- gs_analise_acessibilidade(resultado)
-  if ("cobertura_buffer" %in% tipo)       saida$cobertura_buffer   <- gs_analise_cobertura(resultado, ponto)
-  if ("raio_otimo" %in% tipo)             saida$raio_otimo         <- gs_analise_raio_otimo(resultado)
-  if ("nni" %in% tipo)                    saida$nni                <- gs_analise_nni(resultado)
-  if ("getis_ord" %in% tipo)              saida$getis_ord          <- gs_analise_getis_ord(resultado)
-  if ("lisa" %in% tipo)                   saida$lisa               <- gs_analise_lisa(resultado)
-  if ("ripley_k" %in% tipo)               saida$ripley_k           <- gs_analise_ripley_k(resultado)
-  if ("por_distrito" %in% tipo)           saida$por_distrito       <- gs_analise_por_distrito(resultado)
-  if ("moran_distrital" %in% tipo)        saida$moran_distrital    <- gs_analise_moran_distrital(resultado)
-  if ("cobertura_populacional" %in% tipo) saida$cobertura_populacional <- gs_analise_cobertura_populacional(resultado, ponto, raio)
+  if ("descritivas" %in% tipo) saida$descritivas <-
+    segura(gs_analise_descritivas(resultado), "descritivas")
+  if ("vizinho_mais_proximo" %in% tipo) saida$vizinho_mais_proximo <-
+    segura(gs_analise_vizinho(resultado), "vizinho_mais_proximo")
+  if ("voronoi" %in% tipo) saida$voronoi <-
+    segura(gs_analise_voronoi(resultado, ponto, raio), "voronoi")
+  if ("kde" %in% tipo) saida$kde <-
+    segura(gs_analise_kde(resultado, ponto), "kde")
+  if ("kde_banda" %in% tipo) saida$kde_banda <-
+    segura(gs_analise_kde_banda(resultado, ponto), "kde_banda")
+  if ("raios_progressivos" %in% tipo) saida$raios_progressivos <-
+    segura(gs_analise_raios(resultado, ponto), "raios_progressivos")
+  if ("moran" %in% tipo) saida$moran <-
+    segura(gs_analise_moran(resultado, ponto = ponto, raio_m = raio), "moran")
+  if ("rede_viaria" %in% tipo) saida$rede_viaria <-
+    segura(gs_analise_rede(resultado, ponto), "rede_viaria")
+  if ("acessibilidade_media" %in% tipo) saida$acessibilidade_media <-
+    segura(gs_analise_acessibilidade(resultado), "acessibilidade_media")
+  if ("cobertura_buffer" %in% tipo) saida$cobertura_buffer <-
+    segura(gs_analise_cobertura(resultado, ponto, raio_m = raio), "cobertura_buffer")
+  if ("raio_otimo" %in% tipo) saida$raio_otimo <-
+    segura(gs_analise_raio_otimo(resultado), "raio_otimo")
+  if ("nni" %in% tipo) saida$nni <-
+    segura(gs_analise_nni(resultado, ponto, raio), "nni")
+  if ("getis_ord" %in% tipo) saida$getis_ord <-
+    segura(gs_analise_getis_ord(resultado, ponto = ponto, raio_m = raio), "getis_ord")
+  if ("lisa" %in% tipo) saida$lisa <-
+    segura(gs_analise_lisa(resultado, ponto = ponto, raio_m = raio), "lisa")
+  if ("ripley_k" %in% tipo) saida$ripley_k <-
+    segura(gs_analise_ripley_k(resultado, ponto = ponto, raio_m = raio), "ripley_k")
+  if ("por_distrito" %in% tipo) saida$por_distrito <-
+    segura(gs_analise_por_distrito(resultado, dir = dir), "por_distrito")
+  if ("moran_distrital" %in% tipo) saida$moran_distrital <-
+    segura(gs_analise_moran_distrital(resultado, dir = dir), "moran_distrital")
+  if ("cobertura_populacional" %in% tipo) saida$cobertura_populacional <-
+    segura(gs_analise_cobertura_populacional(
+      resultado, ponto, raio, pop_layer = pop_layer,
+      densidade_km2 = densidade_km2
+    ), "cobertura_populacional")
   saida
 }
 
@@ -780,14 +2035,34 @@ gs_interpretar_analise <- function(analises, resultado, raio_m) {
   out <- list()
   if (is.null(analises) || is.null(resultado)) return(out)
   fmt <- function(...) sprintf(...)
-  d <- resultado$distancia_m
+  executada <- function(x) {
+    !is.null(x) && !(is.list(x) && identical(x[["executado"]], FALSE))
+  }
+  d <- gs_distancias_resultado(resultado)
 
-  if (!is.null(analises$descritivas)) {
-    r <- summary(d)
+  if (!is.null(analises$descritivas) &&
+      !identical(analises$descritivas$executado, FALSE)) {
+    r <- analises$descritivas$estatisticas_distancia
+    if (is.null(r)) r <- as.data.frame(as.list(gs_resumo_distancias(d)))
+    ic <- if (isTRUE(is.finite(r$ic95_media_inf) &&
+                     is.finite(r$ic95_media_sup))) {
+      fmt(" (IC95%% %.0f–%.0f m)", r$ic95_media_inf, r$ic95_media_sup)
+    } else {
+      ""
+    }
+    abertura <- if (isTRUE(analises$descritivas$amostra_truncada)) {
+      fmt(
+        "Foram retidos %d serviço(s) após o limite `n_por_camada`; este resumo não representa todas as ocorrências no raio de %d m.",
+        analises$descritivas$n_total, raio_m
+      )
+    } else {
+      fmt("Foram encontrados %d serviço(s) num raio de %d m.",
+          analises$descritivas$n_total, raio_m)
+    }
     out$descritivas <- fmt(
-      "Foram encontrados %d serviço(s) num raio de %d m. As distâncias vão de %.0f m a %.0f m, com mediana de %.0f m — ou seja, metade dos serviços está a até %.0f m do ponto — e média de %.0f m.",
-      analises$descritivas$n_total, raio_m,
-      r[["Min."]], r[["Max."]], r[["Median"]], r[["Median"]], r[["Mean"]])
+      "%s As distâncias vão de %.0f m a %.0f m, com mediana de %.0f m, MAD de %.0f m e IQR de %.0f m (P25 %.0f m; P75 %.0f m). A média é %.0f m%s.",
+      abertura,
+      r$min, r$max, r$mediana, r$mad, r$iqr, r$p25, r$p75, r$media, ic)
   }
 
   if (!is.null(analises$vizinho_mais_proximo)) {
@@ -800,11 +2075,26 @@ gs_interpretar_analise <- function(analises, resultado, raio_m) {
   }
 
   if (!is.null(analises$acessibilidade_media) &&
+      !identical(analises$acessibilidade_media$executado, FALSE) &&
       !is.null(analises$acessibilidade_media$geral)) {
     g <- analises$acessibilidade_media$geral
+    ic <- if (isTRUE(is.finite(g$ic95_media_inf) &&
+                     is.finite(g$ic95_media_sup))) {
+      fmt("; IC95%% %.0f–%.0f m", g$ic95_media_inf, g$ic95_media_sup)
+    } else {
+      ""
+    }
+    dispersao <- if (isTRUE(is.finite(g$sd) && is.finite(g$cv))) {
+      fmt(" com desvio-padrão de %.0f m (CV = %.1f%%%s)", g$sd, g$cv, ic)
+    } else {
+      " (desvio-padrão e CV não definidos com uma única observação)"
+    }
     out$acessibilidade_media <- fmt(
-      "Acessibilidade média: distância mediana de %.0f m, com P25 de %.0f m e P75 de %.0f m (IQR = %.0f m). A média é %.0f m com desvio-padrão de %.0f m (CV = %s%%).",
-      g$mediana, g$p25, g$p75, g$iqr, g$media, g$sd, g$cv)
+      paste0(
+        "Acessibilidade: mediana de %.0f m, MAD de %.0f m, P25 de %.0f m ",
+        "e P75 de %.0f m (IQR = %.0f m). A média é %.0f m%s."
+      ),
+      g$mediana, g$mad, g$p25, g$p75, g$iqr, g$media, dispersao)
   }
 
   if (!is.null(analises$raio_otimo) && !is.null(analises$raio_otimo$percentis)) {
@@ -830,16 +2120,21 @@ gs_interpretar_analise <- function(analises, resultado, raio_m) {
       isTRUE(analises$cobertura_buffer$executado)) {
     cb <- analises$cobertura_buffer
     out$cobertura_buffer <- fmt(
-      "Os buffers de %d m ao redor dos serviços cobrem %.1f%% da área do casco convexo dos pontos (%.2f de %.2f km²).",
-      cb$raio_buffer_m, cb$pct_cobertura, cb$area_coberta_km2, cb$area_hull_km2)
+      "Os buffers de %d m ao redor dos serviços cobrem %.1f%% da área do buffer da consulta (%.2f de %.2f km²).",
+      cb$raio_buffer_m, cb$pct_cobertura, cb$area_coberta_km2,
+      cb$area_consulta_km2)
   }
 
   if (!is.null(analises$nni) && isTRUE(analises$nni$executado)) {
     n <- analises$nni
     out$nni <- fmt(
-      "Índice de Vizinho Mais Próximo: R = %.2f (%s) com z = %.2f e p = %.3f. A distância média observada ao vizinho mais próximo é %.1f m (esperada: %.1f m).",
+      paste0(
+        "Índice de Vizinho Mais Próximo: R = %.2f (%s) com z = %.2f e ",
+        "p = %.3f pelo método %s. A distância média observada ao vizinho ",
+        "mais próximo é %.1f m (referência simulada/analítica: %.1f m)."
+      ),
       n$indice_nni, n$interpretacao, n$z, n$valor_p,
-      n$distancia_observada_m, n$distancia_esperada_m)
+      n$metodo_p, n$distancia_observada_m, n$distancia_esperada_m)
   }
 
   # Nota: usa [[ ]] (não $) para evitar partial matching — "$moran" casaria
@@ -847,23 +2142,29 @@ gs_interpretar_analise <- function(analises, resultado, raio_m) {
   if (!is.null(analises[["moran"]]) && isTRUE(analises[["moran"]]$executado)) {
     m <- analises[["moran"]]
     out$moran <- fmt(
-      "Moran's I (método: %s): I = %.4f, p = %.4f. %s",
-      m$metodo, m$moran_i, m$valor_p, m$interpretacao)
+      "Moran's I (método: %s; inferência: %s): I = %.4f, p = %.4f. %s",
+      m$metodo, m$metodo_p, m$moran_i, m$valor_p, m$interpretacao)
   }
 
   if (!is.null(analises[["moran_distrital"]]) &&
       isTRUE(analises[["moran_distrital"]]$executado)) {
     md <- analises[["moran_distrital"]]
-    n_lisa <- sum(md$por_distrito$classe %in% c("alto-alto", "baixo-baixo"))
+    n_lisa <- sum(md$por_distrito$classe %in%
+                    c("alto-alto", "baixo-baixo", "alto-baixo", "baixo-alto"),
+                  na.rm = TRUE)
     out$moran_distrital <- fmt(
-      "Moran's I agregado por distrito: I = %.4f, p = %.4f. %d distrito(s) foram sinalizados como aglomerado 'alto-alto' ou 'baixo-baixo' no mapa LISA.",
-      md$moran_i, md$valor_p, n_lisa)
+      paste0(
+        "Moran's I da densidade nas partes distritais observadas: I = %.4f, ",
+        "p = %.4f (%s). %d distrito(s) foram sinalizados em quadrantes ",
+        "LISA após ajuste BH."
+      ),
+      md$moran_i, md$valor_p, md$metodo_p, n_lisa)
   }
 
   if (!is.null(analises[["getis_ord"]]) && isTRUE(analises[["getis_ord"]]$executado)) {
     g <- analises[["getis_ord"]]
     out$getis_ord <- fmt(
-      "Getis-Ord G* em grade hexagonal de %d m: %d célula(s) de ponto quente e %d de ponto frio (|z| > 1,96). Trate como exploratório.",
+      "Getis-Ord G* em grade hexagonal de %d m: %d célula(s) de ponto quente e %d de ponto frio após ajuste BH bilateral. Trate como exploratório.",
       g$celula_m, sum(g$grade$classe == "ponto quente"),
       sum(g$grade$classe == "ponto frio"))
   }
@@ -871,18 +2172,32 @@ gs_interpretar_analise <- function(analises, resultado, raio_m) {
   if (!is.null(analises[["lisa"]]) && isTRUE(analises[["lisa"]]$executado)) {
     l <- analises[["lisa"]]
     out$lisa <- fmt(
-      "LISA (Moran local) em grade hexagonal de %d m: %d célula(s) 'alto-alto' e %d 'baixo-baixo' (p < 0,05). Trate como exploratório.",
+      "LISA (Moran local) em grade hexagonal de %d m: %d 'alto-alto', %d 'baixo-baixo', %d 'alto-baixo' e %d 'baixo-alto' após ajuste BH. Trate como exploratório.",
       l$celula_m, sum(l$grade$classe == "alto-alto"),
-      sum(l$grade$classe == "baixo-baixo"))
+      sum(l$grade$classe == "baixo-baixo"),
+      sum(l$grade$classe == "alto-baixo"),
+      sum(l$grade$classe == "baixo-alto"))
   }
 
   if (!is.null(analises[["por_distrito"]]) && isTRUE(analises[["por_distrito"]]$executado)) {
     pd <- analises[["por_distrito"]]$por_distrito
     if (nrow(pd) > 0) {
       top <- pd[which.max(pd$n_servicos), , drop = FALSE]
+      coluna_distrito <- intersect(c("distrito", "nm_distrito_municipal"),
+                                   names(top))[1]
+      nome_distrito <- if (length(coluna_distrito) == 1 &&
+                           !is.na(coluna_distrito)) {
+        as.character(top[[coluna_distrito]][1])
+      } else {
+        "(não informado)"
+      }
       out$por_distrito <- fmt(
-        "Serviços distribuídos em %d distrito(s) da cidade. O distrito com mais serviços é %s (%d serviço(s), densidade de %.2f por km²).",
-        sum(pd$n_servicos > 0), top$distrito, top$n_servicos,
+        paste0(
+          "Serviços distribuídos nas partes observadas de %d distrito(s). ",
+          "A parte distrital com mais serviços é %s (%d serviço(s), ",
+          "densidade de %.2f por km² observado)."
+        ),
+        sum(pd$n_servicos > 0), nome_distrito, top$n_servicos,
         top$densidade_por_km2)
     }
   }
@@ -907,19 +2222,19 @@ gs_interpretar_analise <- function(analises, resultado, raio_m) {
       round(stats::median(rv$razao_rede_reta), 2), nrow(rv))
   }
 
-  if (!is.null(analises[["kde"]])) {
+  if (executada(analises[["kde"]])) {
     out$kde <- paste0(
       "O mapa de densidade de kernel mostra as áreas de maior concentração de ",
       "serviços: quanto mais quente a cor, maior a concentração local.")
   }
 
-  if (!is.null(analises[["kde_banda"]])) {
+  if (executada(analises[["kde_banda"]])) {
     out$kde_banda <- paste0(
       "O mapa de densidade de kernel com banda estimada (Silverman) mostra as ",
       "áreas de maior concentração de serviços, com suavização ajustada aos dados.")
   }
 
-  if (!is.null(analises[["voronoi"]])) {
+  if (executada(analises[["voronoi"]])) {
     out$voronoi <- paste0(
       "Os polígonos de Voronoi (Thiessen) delimitam, para cada serviço, a área ",
       "em que ele é o mais próximo — uma medida simples de zona de influência.")
@@ -927,9 +2242,9 @@ gs_interpretar_analise <- function(analises, resultado, raio_m) {
 
   if (!is.null(analises$ripley_k) && isTRUE(analises$ripley_k$executado)) {
     out$ripley_k <- paste0(
-      "A função K de Ripley compara a agregação observada com o padrão aleatório ",
-      "em múltiplas escalas: quando a curva observada fica acima da esperada, ",
-      "há agrupamento naquela escala.")
+      "A função K de Ripley é apresentada como diagnóstico multiescala na ",
+      "janela observacional. Sem envelope de simulação, desvios da referência ",
+      "não constituem evidência formal de agrupamento ou inibição.")
   }
 
   out

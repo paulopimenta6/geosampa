@@ -80,12 +80,26 @@ gs_lab_format_quebra <- function(largura = 18, max_caracteres = 30) {
 }
 
 # --- Popups HTML dos serviços (mapa interativo) ------------------------------
+gs_html_escape <- function(x) {
+  x <- as.character(x)
+  x[is.na(x)] <- ""
+  if (requireNamespace("htmltools", quietly = TRUE)) {
+    return(as.character(htmltools::htmlEscape(x)))
+  }
+  x <- gsub("&", "&amp;", x, fixed = TRUE)
+  x <- gsub("<", "&lt;", x, fixed = TRUE)
+  x <- gsub(">", "&gt;", x, fixed = TRUE)
+  x <- gsub('"', "&quot;", x, fixed = TRUE)
+  x
+}
+
 gs_popup_servicos <- function(resultado) {
   vapply(seq_len(nrow(resultado)), function(i) {
     r <- resultado[i, ]
     sprintf("<b>%s</b><br>Tipo: %s<br>Endereço: %s<br>Bairro: %s<br>Distância: %.0f m<br>Camada: %s",
-            r$nome, r$tipo_servico, r$endereco, r$bairro,
-            r$distancia_m, r$camada)
+            gs_html_escape(r$nome), gs_html_escape(r$tipo_servico),
+            gs_html_escape(r$endereco), gs_html_escape(r$bairro),
+            r$distancia_m, gs_html_escape(r$camada))
   }, character(1))
 }
 
@@ -104,7 +118,8 @@ gs_label_servicos <- function(resultado) {
   label <- vapply(seq_len(nrow(resultado)), function(i) {
     r <- resultado[i, ]
     sprintf("<b>%s</b><br>%s<br>%.0f m",
-            ifelse(is.na(r$nome), r$camada, r$nome), tipo[i], r$distancia_m)
+            gs_html_escape(ifelse(is.na(r$nome), r$camada, r$nome)),
+            gs_html_escape(tipo[i]), r$distancia_m)
   }, character(1))
   structure(label, class = c("html", "character"))
 }
@@ -200,10 +215,10 @@ gs_mapa_leaflet <- function(resultado, ponto, raio_m) {
                               group = "Ponto de interesse",
                               label = htmltools::HTML(
                                 sprintf("<b>Ponto de interesse</b><br>%s",
-                                        ponto$origem)),
+                                        gs_html_escape(ponto$origem))),
                               labelOptions = estilo_label,
                               popup = sprintf("<b>Ponto de interesse</b><br>%s",
-                                              ponto$origem)) |>
+                                               gs_html_escape(ponto$origem))) |>
     leaflet::addCircleMarkers(lng = resultado$longitude, lat = resultado$latitude,
                               color = pal(cores), radius = 6, fillOpacity = 0.9,
                               weight = 1.5, fillColor = pal(cores),
@@ -221,7 +236,7 @@ gs_mapa_leaflet <- function(resultado, ponto, raio_m) {
     leaflet::addControl(
       html = sprintf(
         "<div style='font-family:sans-serif;font-size:14px;font-weight:bold;padding:6px 10px;background:rgba(255,255,255,0.9);border-radius:4px;border:1px solid #ddd'>Serviços próximos<br><span style='font-weight:normal;font-size:11px;color:#444'>%s · raio %s m · %d serviço(s)</span></div>",
-        ponto$origem, raio_m, nrow(resultado)),
+        gs_html_escape(ponto$origem), raio_m, nrow(resultado)),
       position = "topright") |>
     leaflet::addLayersControl(
       baseGroups = c("OSM", "CartoDB", "Satélite"),
@@ -243,12 +258,12 @@ gs_mapa_servicos <- function(resultado = NULL, cep = NULL, coordenadas = NULL,
                                                 "rede_viaria"),
                              n_por_camada = NULL, interativo = TRUE,
                              salvar = NULL, largura = 12, altura = NULL,
-                             dpi = 300) {
+                             dpi = 300, dir = gs_caminho_dados()) {
   if (is.null(resultado)) {
     resultado <- gs_servicos_proximos(
       cep = cep, coordenadas = coordenadas, camadas = camadas,
       raio_m = raio_m, n_por_camada = n_por_camada,
-      tipo_distancia = tipo_distancia
+      tipo_distancia = tipo_distancia, dir = dir
     )
   }
   ponto <- attr(resultado, "ponto")

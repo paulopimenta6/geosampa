@@ -12,7 +12,7 @@ gs_tipos_distancia <- function() {
   data.frame(
     tipo = c("geodesica", "euclidiana", "haversine", "manhattan", "rede_viaria"),
     descricao = c(
-      "Geodésica (elipsoidal) via sf::st_distance em CRS geográfico",
+      "Geodésica esférica via s2, independente da configuração global do sf",
       "Euclidiana em metros na projeção oficial UTM/SIRGAS2000 (EPSG:31983)",
       "Haversine sobre a esfera (aproximação leve em WGS84)",
       "Manhattan (|dx| + |dy|) em metros projetados",
@@ -34,6 +34,30 @@ gs_tipos_distancia <- function() {
 # Para `rede_viaria` usa o OSRM (pacote `osrm`, instalado sob demanda); o
 # servidor pode ser configurado com options(osrm.server = ...) ou via
 # options(gs.osrm_server = ...).
+gs_consultar_tabela_osrm <- function(origem, destinos) {
+  osrm::osrmTable(src = origem, dst = destinos, measure = "distance")
+}
+
+gs_distancias_s2 <- function(ponto_sf, pontos_sf) {
+  if (!requireNamespace("s2", quietly = TRUE)) {
+    stop("Pacote 's2' não instalado para a distância geodésica.")
+  }
+  origem <- s2::as_s2_geography(sf::st_transform(ponto_sf, gs_epsg$wgs84))
+  destinos <- s2::as_s2_geography(sf::st_transform(pontos_sf, gs_epsg$wgs84))
+  as.numeric(s2::s2_distance_matrix(origem, destinos)[1, ])
+}
+
+gs_backend_distancia <- function(tipo_distancia) {
+  switch(
+    tipo_distancia,
+    geodesica = "s2::s2_distance (esfera)",
+    euclidiana = "sf::st_distance (EPSG:31983)",
+    haversine = "fórmula de Haversine (raio terrestre 6371000 m)",
+    manhattan = "norma L1 (EPSG:31983)",
+    rede_viaria = paste0("OSRM ", gs_osrm_profile(), " em ", gs_osrm_server())
+  )
+}
+
 gs_calcular_distancias <- function(ponto_sf, pontos_sf,
                                    tipo_distancia = c("geodesica", "euclidiana",
                                                       "haversine", "manhattan",
@@ -41,7 +65,7 @@ gs_calcular_distancias <- function(ponto_sf, pontos_sf,
   tipo_distancia <- match.arg(tipo_distancia)
   switch(
     tipo_distancia,
-    geodesica = as.numeric(sf::st_distance(ponto_sf, pontos_sf)),
+    geodesica = gs_distancias_s2(ponto_sf, pontos_sf),
     euclidiana = {
       pp <- sf::st_transform(ponto_sf, gs_epsg$oficial)
       qq <- sf::st_transform(pontos_sf, gs_epsg$oficial)
@@ -69,8 +93,11 @@ gs_calcular_distancias <- function(ponto_sf, pontos_sf,
         stop("Pacote 'osrm' não instalado para distância por rede viária. ",
              "Instale com: install.packages('osrm')")
       }
-      options(osrm.server = gs_osrm_server(),
-              osrm.profile = gs_osrm_profile())
+      opcoes_anteriores <- options(
+        osrm.server = gs_osrm_server(),
+        osrm.profile = gs_osrm_profile()
+      )
+      on.exit(options(opcoes_anteriores), add = TRUE)
       p0 <- sf::st_coordinates(ponto_sf)[1, ]
       qq <- sf::st_coordinates(pontos_sf)
       if (nrow(qq) > 200) {
@@ -78,18 +105,19 @@ gs_calcular_distancias <- function(ponto_sf, pontos_sf,
                 " pontos via OSRM (pode demorar)...")
       }
       origem <- gs_osrm_input("origem", p0[1], p0[2])
-      destinos <- gs_osrm_input(as.character(seq_len(nrow(qq))),
-                                qq[, 1], qq[, 2])
-      tab <- tryCatch(
-        osrm::osrmTable(src = origem, dst = destinos, measure = "distance"),
-        error = function(e) NULL
-      )
-      if (is.null(tab)) {
+      # O endpoint table conta a origem no limite usual de 100 coordenadas.
+      indices <- split(seq_len(nrow(qq)), ceiling(seq_len(nrow(qq)) / 99))
+      distancias <- tryCatch(unlist(lapply(indices, function(i) {
+        destinos <- gs_osrm_input(as.character(i), qq[i, 1], qq[i, 2])
+        tab <- gs_consultar_tabela_osrm(origem, destinos)
+        gs_osrm_dist_m(tab$distances[1, ])
+      }), use.names = FALSE), error = function(e) NULL)
+      if (is.null(distancias) || length(distancias) != nrow(qq)) {
         stop("Falha ao consultar o servidor OSRM (", gs_osrm_server(),
              "). Configure outro com options(osrm.server = 'http://...') ",
              "ou use um tipo de distância em linha reta.")
       }
-      gs_osrm_dist_m(tab$distances[1, ])
+      distancias
     }
   )
 }
@@ -102,7 +130,7 @@ gs_calcular_distancias <- function(ponto_sf, pontos_sf,
 #   - pedaços do nome (ex.: "ubs") -> casa por substring;
 #   - data.frame vindo de gs_catalogo_equipamentos() (usa a coluna `camada`).
 # Devolve list(resolvidas, nao_encontradas).
-gs_resolver_camadas <- function(camadas, dir = gs_pasta_dados()) {
+gs_resolver_camadas <- function(camadas, dir = gs_caminho_dados()) {
   locais <- gs_camadas_local(dir)
   if (length(locais) == 0) {
     stop("Nenhum CSV em ", dir,
@@ -139,6 +167,36 @@ gs_resolver_camadas <- function(camadas, dir = gs_pasta_dados()) {
   list(resolvidas = unique(resolvidas), nao_encontradas = unique(nao_encontradas))
 }
 
+gs_resultado_proximidade_vazio <- function(ponto, tipo_distancia, raio_m,
+                                           n_por_camada = NULL,
+                                           camadas_consultadas = character(0)) {
+  out <- data.frame(
+    camada = character(0),
+    nome = character(0),
+    tipo_servico = character(0),
+    endereco = character(0),
+    bairro = character(0),
+    distancia_m = numeric(0),
+    distancia_m_exata = numeric(0),
+    latitude = numeric(0),
+    longitude = numeric(0),
+    stringsAsFactors = FALSE
+  )
+  attr(out, "ponto") <- ponto
+  attr(out, "tipo_distancia") <- tipo_distancia
+  attr(out, "raio_m") <- raio_m
+  attr(out, "n_por_camada") <- n_por_camada
+  attr(out, "amostra_truncada") <- FALSE
+  attr(out, "amostragem_por_camada") <- data.frame(
+    camada = as.character(camadas_consultadas),
+    n_disponivel = integer(length(camadas_consultadas)),
+    n_retido = integer(length(camadas_consultadas)),
+    n_omitido = integer(length(camadas_consultadas)), stringsAsFactors = FALSE
+  )
+  attr(out, "backend_distancia") <- gs_backend_distancia(tipo_distancia)
+  out
+}
+
 # --- Busca serviços próximos a um CEP ou coordenada --------------------------
 # Parâmetros:
 #   cep            CEP (ex.: "03175001" ou "03175-001") — alternativa a coordenadas.
@@ -150,15 +208,25 @@ gs_resolver_camadas <- function(camadas, dir = gs_pasta_dados()) {
 #   tipo_distancia métrica de distância (ver gs_tipos_distancia()).
 # Devolve data.frame ordenado (mais próximo primeiro), com os atributos
 # `ponto`, `tipo_distancia` e `raio_m` usados pelos mapas e análises.
-gs_servicos_proximos <- function(cep = NULL, coordenadas = NULL, camadas = NULL,
-                                 raio_m = gs_raio_padrao_m,
-                                 n_por_camada = NULL,
-                                 tipo_distancia = c("geodesica", "euclidiana",
-                                                    "haversine", "manhattan",
-                                                    "rede_viaria"),
-                                 dir = gs_pasta_dados()) {
+gs_servicos_proximos_impl <- function(cep = NULL, coordenadas = NULL,
+                                      camadas = NULL,
+                                      raio_m = gs_raio_padrao_m,
+                                      n_por_camada = NULL,
+                                      tipo_distancia = c(
+                                        "geodesica", "euclidiana", "haversine",
+                                        "manhattan", "rede_viaria"
+                                      ),
+                                      dir = gs_caminho_dados()) {
   tipo_distancia <- match.arg(tipo_distancia)
-  ponto <- gs_resolver_ponto(cep, coordenadas)
+  raio_m <- gs_validar_numero_escalar(
+    raio_m, "raio_m", minimo = 0, minimo_inclusivo = FALSE
+  )
+  if (!is.null(n_por_camada)) {
+    n_por_camada <- as.integer(gs_validar_numero_escalar(
+      n_por_camada, "n_por_camada", minimo = 1, inteiro = TRUE
+    ))
+  }
+  ponto <- gs_resolver_ponto(cep, coordenadas, dir = dir)
 
   resolvidas <- gs_resolver_camadas(camadas, dir)
   if (length(resolvidas$nao_encontradas) > 0) {
@@ -174,13 +242,22 @@ gs_servicos_proximos <- function(cep = NULL, coordenadas = NULL, camadas = NULL,
 
   res <- lapply(camadas, function(cam) {
     arq <- file.path(dir, paste0(cam, ".csv"))
-    tab <- tryCatch(readr::read_csv(arq, show_col_types = FALSE),
-                    error = function(e) NULL)
-    if (is.null(tab)) return(NULL)
-    if (!all(c("latitude", "longitude") %in% names(tab))) return(NULL)
+    cabecalho <- gs_ler_cabecalho_csv(arq)
+    if (!all(c("latitude", "longitude") %in% names(cabecalho))) return(NULL)
+    tab <- gs_ler_csv_verificado(
+      arq,
+      col_types = readr::cols(
+        latitude = readr::col_double(),
+        longitude = readr::col_double(),
+        .default = readr::col_guess()
+      )
+    )
     tab$latitude  <- as.numeric(tab$latitude)
     tab$longitude <- as.numeric(tab$longitude)
-    tab <- tab[!is.na(tab$latitude) & !is.na(tab$longitude), , drop = FALSE]
+    tab <- tab[!is.na(tab$latitude) & is.finite(tab$latitude) &
+                 tab$latitude >= -90 & tab$latitude <= 90 &
+                 !is.na(tab$longitude) & is.finite(tab$longitude) &
+                 tab$longitude >= -180 & tab$longitude <= 180, , drop = FALSE]
     if (nrow(tab) == 0) return(NULL)
 
     pts <- sf::st_as_sf(tab, coords = c("longitude", "latitude"),
@@ -189,14 +266,14 @@ gs_servicos_proximos <- function(cep = NULL, coordenadas = NULL, camadas = NULL,
       # Pré-filtro por linha reta: a distância por rede é sempre >= a geodésica,
       # então pontos além de `raio_m` em linha reta nunca entrariam no raio.
       # Evita requests gigantes ao servidor OSRM.
-      geo <- as.numeric(sf::st_distance(ponto$sf, pts))
+      geo <- gs_distancias_s2(ponto$sf, pts)
       manter <- geo <= raio_m
       pts <- pts[manter, , drop = FALSE]
       tab <- tab[manter, , drop = FALSE]
       if (nrow(pts) == 0) return(NULL)
     }
     dists <- gs_calcular_distancias(ponto$sf, pts, tipo_distancia)
-    tab$distancia_m <- round(dists, 1)
+    tab$distancia_m <- dists
     tab$camada      <- cam
     tab$nome        <- if ("nm_equipamento" %in% names(tab)) tab$nm_equipamento else NA_character_
     tab$tipo_servico <- if ("nm_tipo_equipamento" %in% names(tab)) tab$nm_tipo_equipamento else NA_character_
@@ -211,11 +288,21 @@ gs_servicos_proximos <- function(cep = NULL, coordenadas = NULL, camadas = NULL,
 
   out <- do.call(rbind, Filter(Negate(is.null), res))
   if (is.null(out) || nrow(out) == 0) {
-    stop("Nenhum serviço encontrado nas camadas informadas.")
+    return(gs_resultado_proximidade_vazio(
+      ponto, tipo_distancia, raio_m, n_por_camada, camadas
+    ))
   }
 
-  sel <- out[out$distancia_m <= raio_m, , drop = FALSE]
-  if (!is.null(n_por_camada)) {
+  sel <- out[!is.na(out$distancia_m) & is.finite(out$distancia_m) &
+               out$distancia_m <= raio_m, , drop = FALSE]
+  disponiveis <- table(factor(as.character(sel$camada), levels = camadas))
+  amostragem <- data.frame(
+    camada = names(disponiveis), n_disponivel = as.integer(disponiveis),
+    stringsAsFactors = FALSE
+  )
+  amostra_truncada <- FALSE
+  if (!is.null(n_por_camada) && nrow(sel) > 0) {
+    amostra_truncada <- any(table(sel$camada) > n_por_camada)
     sel <- do.call(rbind, lapply(split(sel, sel$camada), function(d) {
       if (nrow(d) > n_por_camada) d[seq_len(n_por_camada), , drop = FALSE] else d
     }))
@@ -230,10 +317,46 @@ gs_servicos_proximos <- function(cep = NULL, coordenadas = NULL, camadas = NULL,
   cols <- c("camada", "nome", "tipo_servico", "endereco", "bairro",
             "distancia_m", "latitude", "longitude")
   sel <- sel[, intersect(cols, names(sel)), drop = FALSE]
+  if (nrow(sel) == 0) {
+    return(gs_resultado_proximidade_vazio(
+      ponto, tipo_distancia, raio_m, n_por_camada, camadas
+    ))
+  }
   rownames(sel) <- NULL
+  sel$distancia_m_exata <- sel$distancia_m
+  sel$distancia_m <- round(sel$distancia_m, 1)
+  sel <- sel[, c("camada", "nome", "tipo_servico", "endereco", "bairro",
+                 "distancia_m", "distancia_m_exata", "latitude", "longitude"),
+             drop = FALSE]
 
   attr(sel, "ponto")          <- ponto
   attr(sel, "tipo_distancia") <- tipo_distancia
   attr(sel, "raio_m")         <- raio_m
+  attr(sel, "n_por_camada")   <- n_por_camada
+  attr(sel, "amostra_truncada") <- amostra_truncada
+  retidos <- table(as.character(sel$camada))
+  amostragem$n_retido <- as.integer(retidos[match(
+    amostragem$camada, names(retidos)
+  )])
+  amostragem$n_retido[is.na(amostragem$n_retido)] <- 0L
+  amostragem$n_omitido <- amostragem$n_disponivel - amostragem$n_retido
+  attr(sel, "amostragem_por_camada") <- amostragem
+  attr(sel, "backend_distancia") <- gs_backend_distancia(tipo_distancia)
   sel
+}
+
+gs_servicos_proximos <- function(cep = NULL, coordenadas = NULL, camadas = NULL,
+                                 raio_m = gs_raio_padrao_m,
+                                 n_por_camada = NULL,
+                                 tipo_distancia = c("geodesica", "euclidiana",
+                                                    "haversine", "manhattan",
+                                                    "rede_viaria"),
+                                 dir = gs_caminho_dados()) {
+  executar <- function() gs_servicos_proximos_impl(
+    cep = cep, coordenadas = coordenadas, camadas = camadas,
+    raio_m = raio_m, n_por_camada = n_por_camada,
+    tipo_distancia = tipo_distancia, dir = dir
+  )
+  if (!dir.exists(dir)) return(executar())
+  gs_com_lock(gs_lock_diretorio(dir), executar())
 }
