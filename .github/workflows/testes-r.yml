@@ -13,28 +13,100 @@ on:
 
 jobs:
   testes:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
+
     steps:
-      - uses: actions/checkout@v4
-      - uses: r-lib/actions/setup-r@v2
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Configurar R
+        uses: r-lib/actions/setup-r@v2
         with:
           r-version: '4.6.1'
           use-public-rspm: true
-      - uses: r-lib/actions/setup-renv@v2
+
+      - name: Instalar dependências de sistema
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            cmake \
+            gdal-bin \
+            libabsl-dev \
+            libcurl4-openssl-dev \
+            libgdal-dev \
+            libgeos-dev \
+            libpng-dev \
+            libproj-dev \
+            libssl-dev \
+            libudunits2-dev \
+            libx11-dev \
+            libxml2-dev \
+            pandoc \
+            proj-bin
+
+      - name: Diagnóstico geoespacial do sistema
+        run: |
+          echo "=== GDAL ==="
+          gdalinfo --version
+
+          echo "=== PROJ ==="
+          proj 2>&1 | head -n 1 || true
+
+          echo "=== GDAL via pkg-config ==="
+          pkg-config --modversion gdal || true
+
+          echo "=== PROJ via pkg-config ==="
+          pkg-config --modversion proj || true
+
+      - name: Restaurar ambiente renv
+        uses: r-lib/actions/setup-renv@v2
+
+      - name: Verificar pacotes principais
+        run: |
+          Rscript -e '
+            pkgs <- c(
+              "httr",
+              "jsonlite",
+              "sf",
+              "s2",
+              "readr",
+              "xml2",
+              "testthat"
+            )
+
+            for (p in pkgs) {
+              cat("Carregando", p, "...\n")
+              library(p, character.only = TRUE)
+            }
+
+            cat("\n=== sessionInfo ===\n")
+            print(sessionInfo())
+
+            cat("\n=== sf_extSoftVersion ===\n")
+            print(sf::sf_extSoftVersion())
+          '
+
       - name: Parse
         run: >-
           Rscript -e
-          'f <- c(list.files("R", pattern="[.]R$", full.names=TRUE),
-          list.files("tests", pattern="[.]R$", full.names=TRUE, recursive=TRUE),
-          list.files("scripts", pattern="[.]R$", full.names=TRUE));
+          'f <- c(
+            list.files("R", pattern="[.]R$", full.names=TRUE),
+            list.files("tests", pattern="[.]R$", full.names=TRUE, recursive=TRUE),
+            list.files("scripts", pattern="[.]R$", full.names=TRUE)
+          );
           invisible(lapply(f, function(x) parse(file=x)))'
+
       - name: Testes offline
         run: Rscript tests/testthat.R
+
       - name: Integrações reais
         if: ${{ github.event_name == 'workflow_dispatch' && inputs.executar_rede }}
         env:
           GEOSAMPA_RUN_NETWORK_TESTS: "true"
         run: >-
           Rscript -e
-          'testthat::test_dir("tests/testthat", filter="integracao-rede",
-          stop_on_failure=TRUE)'
+          'testthat::test_dir(
+            "tests/testthat",
+            filter="integracao-rede",
+            stop_on_failure=TRUE
+          )'
