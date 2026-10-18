@@ -1,14 +1,3 @@
-local_mock_global <- function(..., .local_envir = parent.frame()) {
-  novos <- list(...)
-  ambiente <- globalenv()
-  antigos <- mget(names(novos), envir = ambiente, inherits = FALSE)
-  for (nome in names(novos)) assign(nome, novos[[nome]], envir = ambiente)
-  withr::defer({
-    for (nome in names(antigos)) assign(nome, antigos[[nome]], envir = ambiente)
-  }, envir = .local_envir)
-  invisible(NULL)
-}
-
 resposta_http_mock <- function(conteudo, tipo = "application/json") {
   structure(
     list(

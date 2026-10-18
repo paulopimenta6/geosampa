@@ -158,8 +158,9 @@ gs_cep_para_coordenadas <- function(cep, fonte = c("local", "nominatim"),
 }
 
 # --- Resolve um ponto de interesse a partir de CEP ou coordenadas -----------
-# Uso interno do módulo: devolve lista com latitude, longitude, origem (rótulo)
-# e o ponto como objeto sf (EPSG:4326).
+# Uso interno do módulo: devolve latitude, longitude, origem (rótulo), fonte,
+# precisão e o ponto como objeto sf (EPSG:4326). Referências apenas da cidade
+# continuam disponíveis na consulta direta, mas não podem orientar uma busca.
 gs_resolver_ponto <- function(cep = NULL, coordenadas = NULL,
                               dir = gs_caminho_dados()) {
   tem_cep <- !is.null(cep)
@@ -170,20 +171,32 @@ gs_resolver_ponto <- function(cep = NULL, coordenadas = NULL,
 
   if (tem_cep) {
     coord <- gs_cep_para_coordenadas(cep, dir = dir)
+    if (grepl("cidade", coord$precisao, ignore.case = TRUE)) {
+      stop("O CEP ", coord$cep, " foi localizado apenas pela referência da cidade. ",
+           "Informe `coordenadas = c(latitude, longitude)` para buscar serviços ",
+           "no local desejado.")
+    }
     ponto <- gs_validar_coordenadas(c(coord$latitude, coord$longitude))
     lat <- ponto[1]
     lon <- ponto[2]
-    origem <- paste0("CEP ", coord$cep, " (fonte: ", coord$fonte, ")")
+    fonte <- coord$fonte
+    precisao <- coord$precisao
+    origem <- paste0("CEP ", coord$cep, " (fonte: ", fonte,
+                     "; localização aproximada; precisão: ", precisao, ")")
   } else {
     ponto <- gs_validar_coordenadas(coordenadas)
     lat <- ponto[1]
     lon <- ponto[2]
     origem <- "coordenadas informadas"
+    fonte <- "informada"
+    precisao <- "coordenadas informadas pelo usuário (precisão não aferida)"
   }
   list(
     latitude  = lat,
     longitude = lon,
     origem    = origem,
+    fonte     = fonte,
+    precisao  = precisao,
     sf        = sf::st_sfc(sf::st_point(c(lon, lat)), crs = gs_epsg$wgs84)
   )
 }

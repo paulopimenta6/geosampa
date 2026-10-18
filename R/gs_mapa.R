@@ -167,8 +167,10 @@ gs_mapa_ggplot <- function(resultado, ponto, raio_m) {
     gs_guia_legenda_mapa(ncol = ncol_legenda) +
     ggplot2::labs(
       title = "Serviços próximos",
-      subtitle = sprintf("Ponto: %s | Raio: %s m | %d serviço(s)",
-                         ponto$origem, raio_m, nrow(resultado)),
+      subtitle = paste(strwrap(
+        sprintf("Ponto: %s | Raio: %s m | %d serviço(s)",
+                ponto$origem, raio_m, nrow(resultado)), width = 95
+      ), collapse = "\n"),
       color = "Tipo de serviço",
       caption = "Fonte: Prefeitura de São Paulo / GeoSampa"
     )
