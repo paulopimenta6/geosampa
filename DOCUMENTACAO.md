@@ -264,11 +264,17 @@ O explorador tenta encontrar uma referência nesta ordem:
 
 Quando um CEP está no índice local, a consulta pode funcionar sem internet. Fora
 dele, é preciso que ViaCEP e Nominatim estejam disponíveis. Observe as colunas
-`fonte` e `precisao`: uma referência de rua ou cidade não deve ser tratada como
-localização exata.
+`fonte` e `precisao`: as referências de CEP, rua e mediana do índice local são
+aproximadas. Essa informação acompanha o ponto resolvido, os mapas e os
+relatórios, e é exportada nas colunas `fonte` e `precisao` de
+`metadados_consulta.csv`.
 
-`fonte` e `precisao`: uma referência de rua ou cidade não deve ser tratada como
-localização exata.
+Quando só há referência da cidade, `gs_cep_para_coordenadas()` continua
+devolvendo essa coordenada com sua precisão. Já a busca de serviços, os mapas
+e os relatórios gerados a partir de um CEP interrompem a consulta e solicitam
+`coordenadas = c(latitude, longitude)`, para evitar usar a cidade como se fosse
+a localização do CEP. Coordenadas manuais continuam disponíveis e são
+identificadas nos metadados como fonte `informada`, com precisão não aferida.
 
 Para reconstruir o índice depois de baixar novas camadas:
 
@@ -549,7 +555,7 @@ saidas/minha_primeira_expedicao/
 | Arquivo | Para que serve |
 |---|---|
 | `servicos_proximos.csv` | Lista de equipamentos usados na análise. |
-| `metadados_consulta.csv` | Raio, métrica de distância e outras escolhas da consulta. |
+| `metadados_consulta.csv` | Fonte e precisão da localização, raio, métrica de distância e outras escolhas da consulta. |
 | `amostragem_por_camada.csv` | Quantos itens existiam, foram mantidos ou omitidos. |
 | `metricas.csv` | Resultados numéricos normalizados. |
 | `interpretacoes.csv` | Leituras automáticas para ajudar na primeira interpretação. |

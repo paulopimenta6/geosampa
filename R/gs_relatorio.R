@@ -264,6 +264,8 @@ gs_metadados_consulta <- function(resultado, id_origem = "origem") {
   data.frame(
     id_origem = as.character(id_origem),
     origem = as.character(valor_ponto("origem")),
+    fonte = as.character(valor_ponto("fonte")),
+    precisao = as.character(valor_ponto("precisao")),
     latitude = suppressWarnings(as.numeric(valor_ponto("latitude"))),
     longitude = suppressWarnings(as.numeric(valor_ponto("longitude"))),
     raio_m = suppressWarnings(as.numeric(attr(resultado, "raio_m"))[1]),
