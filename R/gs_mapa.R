@@ -124,6 +124,29 @@ gs_label_servicos <- function(resultado) {
   structure(label, class = c("html", "character"))
 }
 
+# Rótulos comuns aos mapas; resultados antigos sem métrica usam o padrão.
+gs_rotulos_limite_mapa <- function(resultado, raio_m) {
+  tipo <- attr(resultado, "tipo_distancia")
+  tipo <- if (length(tipo) == 0 || is.na(tipo[1])) "geodesica" else as.character(tipo[1])
+  list(
+    tipo_distancia = tipo,
+    metrica = switch(tipo, geodesica = "Geodésica", euclidiana = "Euclidiana",
+                     haversine = "Haversine", manhattan = "Manhattan",
+                     rede_viaria = "Rede viária", tipo),
+    grupo = switch(tipo, manhattan = "Limite Manhattan",
+                   rede_viaria = "Referência em linha reta", "Raio de busca"),
+    descricao = switch(
+      tipo,
+      manhattan = sprintf("Limite Manhattan: %s m", raio_m),
+      rede_viaria = sprintf(
+        paste0("Referência de distância em linha reta: %s m; ",
+               "não representa área alcançável pela rede."), raio_m
+      ),
+      sprintf("Raio de busca: %s m", raio_m)
+    )
+  )
+}
+
 # --- Mapa estático com ggplot2 ----------------------------------------------
 gs_mapa_ggplot <- function(resultado, ponto, raio_m) {
   if (!requireNamespace("ggplot2", quietly = TRUE)) {
@@ -133,10 +156,20 @@ gs_mapa_ggplot <- function(resultado, ponto, raio_m) {
                       crs = gs_epsg$wgs84)
   origem <- sf::st_sfc(sf::st_point(c(ponto$longitude, ponto$latitude)),
                        crs = gs_epsg$wgs84)
-  buffer <- sf::st_transform(
-    sf::st_buffer(sf::st_transform(origem, gs_epsg$oficial), raio_m),
-    gs_epsg$wgs84
-  )
+  rotulos <- gs_rotulos_limite_mapa(resultado, raio_m)
+  origem_utm <- sf::st_transform(origem, gs_epsg$oficial)
+  buffer <- if (rotulos$tipo_distancia == "manhattan") {
+    gs_buffer_manhattan(origem_utm, raio_m)
+  } else {
+    sf::st_buffer(origem_utm, raio_m)
+  }
+  buffer <- sf::st_transform(buffer, gs_epsg$wgs84)
+  rede <- rotulos$tipo_distancia == "rede_viaria"
+  legenda <- "Fonte: Prefeitura de São Paulo / GeoSampa"
+  if (rede) {
+    legenda <- paste(paste(strwrap(rotulos$descricao, width = 95), collapse = "\n"),
+                     legenda, sep = "\n")
+  }
 
   cores <- if ("tipo_servico" %in% names(resultado) &&
                !all(is.na(resultado$tipo_servico))) "tipo_servico" else "camada"
@@ -154,7 +187,7 @@ gs_mapa_ggplot <- function(resultado, ponto, raio_m) {
   ylim <- c(bb["ymin"] - margem, bb["ymax"] + margem)
 
   ggplot2::ggplot() +
-    ggplot2::geom_sf(data = buffer, fill = "#2c7fb8", alpha = 0.08,
+    ggplot2::geom_sf(data = buffer, fill = if (rede) NA else "#2c7fb8", alpha = 0.08,
                      color = "#2c7fb8", linetype = "dashed") +
     ggplot2::geom_sf(data = pts, ggplot2::aes(color = .data[[cores]]),
                      size = 2.5, alpha = 0.95) +
@@ -168,11 +201,11 @@ gs_mapa_ggplot <- function(resultado, ponto, raio_m) {
     ggplot2::labs(
       title = "Serviços próximos",
       subtitle = paste(strwrap(
-        sprintf("Ponto: %s | Raio: %s m | %d serviço(s)",
-                ponto$origem, raio_m, nrow(resultado)), width = 95
+        sprintf("Ponto: %s | Distância: %s | Raio: %s m | %d serviço(s)",
+                ponto$origem, rotulos$metrica, raio_m, nrow(resultado)), width = 95
       ), collapse = "\n"),
       color = "Tipo de serviço",
-      caption = "Fonte: Prefeitura de São Paulo / GeoSampa"
+      caption = legenda
     )
 }
 
@@ -181,6 +214,9 @@ gs_mapa_leaflet <- function(resultado, ponto, raio_m) {
   if (!requireNamespace("leaflet", quietly = TRUE)) {
     stop("Pacote 'leaflet' não instalado. Instale com install.packages('leaflet').")
   }
+  rotulos <- gs_rotulos_limite_mapa(resultado, raio_m)
+  rede <- rotulos$tipo_distancia == "rede_viaria"
+  aviso <- if (rede) paste0("<br>", gs_html_escape(rotulos$descricao)) else ""
   cores <- if ("tipo_servico" %in% names(resultado) &&
                !all(is.na(resultado$tipo_servico))) {
     resultado$tipo_servico
@@ -198,19 +234,34 @@ gs_mapa_leaflet <- function(resultado, ponto, raio_m) {
                  "border-color" = "rgba(0,0,0,0.5)"),
     textsize = "12px", direction = "auto", sticky = TRUE)
 
-  leaflet::leaflet() |>
+  mapa <- leaflet::leaflet() |>
     leaflet::addProviderTiles("OpenStreetMap.Mapnik", group = "OSM") |>
     leaflet::addProviderTiles("CartoDB.Positron", group = "CartoDB") |>
-    leaflet::addProviderTiles("Esri.WorldImagery", group = "Satélite") |>
-    leaflet::addCircles(lng = ponto$longitude, lat = ponto$latitude,
-                        radius = raio_m, color = "#2c7fb8", weight = 1.5,
-                        opacity = 0.7, fillOpacity = 0.08, dashArray = "4 4",
-                        group = "Raio de busca",
-                        label = sprintf("Raio de busca: %s m", raio_m),
-                        labelOptions = estilo_label,
-                        highlightOptions = leaflet::highlightOptions(
-                          weight = 3, color = "#2c7fb8", opacity = 1,
-                          fillOpacity = 0.15)) |>
+    leaflet::addProviderTiles("Esri.WorldImagery", group = "Satélite")
+  if (rotulos$tipo_distancia == "manhattan") {
+    origem <- sf::st_sfc(sf::st_point(c(ponto$longitude, ponto$latitude)),
+                         crs = gs_epsg$wgs84)
+    limite <- gs_buffer_manhattan(sf::st_transform(origem, gs_epsg$oficial), raio_m)
+    mapa <- leaflet::addPolygons(
+      mapa, data = sf::st_transform(limite, gs_epsg$wgs84),
+      color = "#2c7fb8", weight = 1.5, opacity = 0.7,
+      fillOpacity = 0.08, dashArray = "4 4", group = rotulos$grupo,
+      label = rotulos$descricao, labelOptions = estilo_label,
+      highlightOptions = leaflet::highlightOptions(
+        weight = 3, color = "#2c7fb8", opacity = 1, fillOpacity = 0.15)
+    )
+  } else {
+    mapa <- leaflet::addCircles(
+      mapa, lng = ponto$longitude, lat = ponto$latitude, radius = raio_m,
+      color = "#2c7fb8", weight = 1.5, opacity = 0.7,
+      fillOpacity = if (rede) 0 else 0.08, dashArray = "4 4", group = rotulos$grupo,
+      label = rotulos$descricao, labelOptions = estilo_label,
+      highlightOptions = leaflet::highlightOptions(
+        weight = 3, color = "#2c7fb8", opacity = 1,
+        fillOpacity = if (rede) 0 else 0.15)
+    )
+  }
+  mapa |>
     leaflet::addCircleMarkers(lng = ponto$longitude, lat = ponto$latitude,
                               color = "#d7301f", radius = 9, fillOpacity = 0.95,
                               weight = 2, fillColor = "#d7301f",
@@ -237,12 +288,13 @@ gs_mapa_leaflet <- function(resultado, ponto, raio_m) {
                          options = leaflet::scaleBarOptions(imperial = FALSE)) |>
     leaflet::addControl(
       html = sprintf(
-        "<div style='font-family:sans-serif;font-size:14px;font-weight:bold;padding:6px 10px;background:rgba(255,255,255,0.9);border-radius:4px;border:1px solid #ddd'>Serviços próximos<br><span style='font-weight:normal;font-size:11px;color:#444'>%s · raio %s m · %d serviço(s)</span></div>",
-        gs_html_escape(ponto$origem), raio_m, nrow(resultado)),
+        "<div style='font-family:sans-serif;font-size:14px;font-weight:bold;padding:6px 10px;background:rgba(255,255,255,0.9);border-radius:4px;border:1px solid #ddd'>Serviços próximos<br><span style='font-weight:normal;font-size:11px;color:#444'>%s · Distância: %s · raio %s m · %d serviço(s)%s</span></div>",
+        gs_html_escape(ponto$origem), gs_html_escape(rotulos$metrica),
+        raio_m, nrow(resultado), aviso),
       position = "topright") |>
     leaflet::addLayersControl(
       baseGroups = c("OSM", "CartoDB", "Satélite"),
-      overlayGroups = c("Serviços", "Raio de busca", "Ponto de interesse"),
+      overlayGroups = c("Serviços", rotulos$grupo, "Ponto de interesse"),
       options = leaflet::layersControlOptions(collapsed = FALSE)
     )
 }
