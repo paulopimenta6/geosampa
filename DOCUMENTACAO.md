@@ -57,8 +57,8 @@ e longitude no arquivo CSV.
   exato no mapa.
 - **Coordenadas** são dois números que indicam uma posição: latitude e
   longitude. São Paulo fica aproximadamente em `-23.55, -46.63`.
-- **Raio** é o tamanho do círculo de busca. `raio_m = 2000` significa procurar
-  até 2.000 metros do ponto de partida.
+- **Raio** é o limite de distância da busca. `raio_m = 2000` significa procurar
+  até 2.000 metros do ponto de partida, segundo a métrica escolhida.
 
 Uma coordenada deve ser escrita sempre nesta ordem:
 
@@ -418,6 +418,14 @@ executadas para esse resultado.
 
 Depois de obter `proximos`, você pode criar dois tipos de mapa.
 
+Ambos informam a métrica de distância usada na consulta. Para Manhattan, o
+limite é um losango construído em EPSG:31983 e transformado para exibição.
+Para rede viária, o círculo é apenas uma referência de distância em linha
+reta, com aviso explícito de que não representa a área alcançável pela rede;
+o mapa não calcula isócronas. Geodésica, euclidiana e Haversine mantêm o
+círculo usual. Também é possível gerar mapas de resultados limitados por
+`n_por_camada`.
+
 ### Mapa estático: uma imagem para relatório
 
 ```r
@@ -428,7 +436,7 @@ gs_mapa_servicos(
 )
 ```
 
-O PNG mostra o ponto de partida, o círculo do raio e os serviços coloridos por
+O PNG mostra o ponto de partida, o limite visual e os serviços coloridos por
 tipo. Você pode controlar `largura`, `altura` e `dpi` quando precisar de uma
 imagem maior.
 
@@ -747,10 +755,11 @@ Os equipamentos encontrados são registros administrativos dentro do raio de
 busca. Eles não representam uma amostra aleatória da cidade. Diferenças entre
 dois CEPs são descritivas e não provam causa e efeito.
 
-### O radar enxerga um círculo, não o mundo inteiro
+### O radar tem um limite de consulta
 
-O círculo da consulta não é automaticamente recortado pelo limite municipal ou
-pela cobertura de cada cadastro. Perto das bordas, a interpretação exige cuidado.
+O limite desenhado não é automaticamente recortado pelo limite municipal ou
+pela cobertura de cada cadastro. Em rede viária, ele é somente uma referência
+em linha reta. Perto das bordas, a interpretação exige cuidado.
 
 ### Poucos pontos limitam análises
 

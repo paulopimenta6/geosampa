@@ -11,6 +11,17 @@
 # ============================================================
 
 # --- Utilitários internos -----------------------------------------------------
+# Geometria compartilhada com os mapas, sem validações de amostragem.
+# O ponto já deve estar projetado em EPSG:31983, com coordenadas em metros.
+gs_buffer_manhattan <- function(ponto_utm, raio_m) {
+  centro <- sf::st_coordinates(ponto_utm)[1, ]
+  sf::st_sfc(sf::st_polygon(list(rbind(
+    centro + c(0, raio_m), centro + c(raio_m, 0),
+    centro + c(0, -raio_m), centro + c(-raio_m, 0),
+    centro + c(0, raio_m)
+  ))), crs = sf::st_crs(ponto_utm))
+}
+
 gs_dominio_consulta <- function(resultado, ponto = NULL, raio_m = NULL) {
   ponto_armazenado <- attr(resultado, "ponto")
   raio_armazenado <- attr(resultado, "raio_m")
@@ -128,12 +139,7 @@ gs_dominio_consulta <- function(resultado, ponto = NULL, raio_m = NULL) {
       sf::st_transform(sf::st_as_sfc(circulo), gs_epsg$oficial)
     }, error = function(e) NULL)
   } else if (identical(tipo_distancia, "manhattan")) {
-    centro <- sf::st_coordinates(ponto_utm)[1, ]
-    sf::st_sfc(sf::st_polygon(list(rbind(
-      centro + c(0, raio_m), centro + c(raio_m, 0),
-      centro + c(0, -raio_m), centro + c(-raio_m, 0),
-      centro + c(0, raio_m)
-    ))), crs = sf::st_crs(ponto_utm))
+    gs_buffer_manhattan(ponto_utm, raio_m)
   } else {
     tryCatch(sf::st_buffer(ponto_utm, raio_m), error = function(e) NULL)
   }
