@@ -208,8 +208,9 @@ gs_baixar_camada(
 )
 ```
 
-Arquivos obtidos com filtro recebem um sufixo no nome para não confundir esse
-recorte com a camada completa.
+Arquivos obtidos com filtro recebem o sufixo `__filtro_...` no nome para não
+confundir esse recorte com a camada completa. As buscas por tema, parte do nome
+e `NULL`/`"todos"`/`"all"`/`"todas"` selecionam apenas camadas completas.
 
 ### Ler os dados
 
@@ -233,6 +234,13 @@ gs_listar_servicos("saude")
 
 Essa é a lista mais segura para preencher o argumento `camadas`, pois considera
 o que já foi baixado localmente e possui coordenadas aproveitáveis.
+
+A lista também mostra os recortes filtrados. Para consultar um deles, copie seu
+nome completo, incluindo `__filtro_...` e sem `.csv`, para `camadas`. Se só
+houver recortes, as seleções automáticas não os incluem e a busca orienta a
+seleção explícita. Você também pode baixar a camada completa. Selecionar
+explicitamente a camada completa e seu recorte inclui ambos; os equipamentos
+não são deduplicados por nome nem por coordenadas.
 
 <a name="missao-3-encontrar-o-ponto-de-partida"></a>
 ## Missão 3: encontrar o ponto de partida
