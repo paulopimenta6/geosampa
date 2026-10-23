@@ -162,6 +162,13 @@ No argumento `camadas`, você pode informar:
 "ubs"                                       # parte do nome
 ```
 
+Temas, partes do nome e `NULL`/`"todos"`/`"all"`/`"todas"` selecionam apenas
+camadas completas. Recortes com `__filtro_` no nome continuam visíveis em
+`gs_listar_servicos()`, mas só entram na busca quando você informa seu nome
+completo em `camadas` (sem `.csv`). Se só houver recortes, escolha um desses
+nomes explicitamente ou baixe a camada completa. Escolher explicitamente a
+camada completa e seu recorte inclui ambos, sem deduplicar equipamentos.
+
 Antes de procurar, baixe a camada desejada. Por exemplo:
 
 ```r

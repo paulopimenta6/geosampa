@@ -124,11 +124,12 @@ gs_calcular_distancias <- function(ponto_sf, pontos_sf,
 
 # --- Resolve o argumento `camadas` para nomes reais presentes em data/ -------
 # Aceita:
-#   - NULL / "todos" / "all" / "todas" -> todas as camadas locais;
+#   - NULL / "todos" / "all" / "todas" -> todas as camadas locais completas;
 #   - nomes exatos de camadas (com ou sem o prefixo "geoportal:");
 #   - temas (ex.: "saude") -> expande para todas as camadas daquele tema;
 #   - pedaços do nome (ex.: "ubs") -> casa por substring;
 #   - data.frame vindo de gs_catalogo_equipamentos() (usa a coluna `camada`).
+# Recortes `__filtro_` só entram pelo nome exato, nunca por tema ou substring.
 # Devolve list(resolvidas, nao_encontradas).
 gs_resolver_camadas <- function(camadas, dir = gs_caminho_dados()) {
   locais <- gs_camadas_local(dir)
@@ -136,27 +137,28 @@ gs_resolver_camadas <- function(camadas, dir = gs_caminho_dados()) {
     stop("Nenhum CSV em ", dir,
          ". Baixe as camadas com gs_baixar_todos_equipamentos().")
   }
+  completas <- locais[!grepl("__filtro_", locais, fixed = TRUE)]
   if (is.null(camadas)) {
-    return(list(resolvidas = locais, nao_encontradas = character(0)))
+    return(list(resolvidas = completas, nao_encontradas = character(0)))
   }
   if (is.data.frame(camadas)) camadas <- camadas$camada
   camadas <- as.character(camadas)
   if (length(camadas) == 1 && tolower(camadas) %in% c("todos", "all", "todas")) {
-    return(list(resolvidas = locais, nao_encontradas = character(0)))
+    return(list(resolvidas = completas, nao_encontradas = character(0)))
   }
 
   resolvidas <- character(0)
   nao_encontradas <- character(0)
-  temas_locais <- unique(gs_tema_camada(locais))
+  temas_locais <- unique(gs_tema_camada(completas))
 
   for (v in unique(camadas)) {
     v <- sub("^geoportal:", "", v)
     if (v %in% locais) {
       resolvidas <- c(resolvidas, v)
     } else if (tolower(v) %in% temas_locais) {
-      resolvidas <- c(resolvidas, locais[gs_tema_camada(locais) == tolower(v)])
+      resolvidas <- c(resolvidas, completas[gs_tema_camada(completas) == tolower(v)])
     } else {
-      parcial <- locais[grepl(v, locais, ignore.case = TRUE)]
+      parcial <- completas[grepl(v, completas, ignore.case = TRUE)]
       if (length(parcial) > 0) {
         resolvidas <- c(resolvidas, parcial)
       } else {
@@ -202,7 +204,7 @@ gs_resultado_proximidade_vazio <- function(ponto, tipo_distancia, raio_m,
 #   cep            CEP (ex.: "03175001" ou "03175-001") — alternativa a coordenadas.
 #   coordenadas    vetor c(latitude, longitude) — alternativa a cep.
 #   camadas        vetor de nomes de camadas (base sem prefixo, ex.:
-#                  "equipamento_saude_ubs_posto_centro"). NULL usa TODAS as locais.
+#                  "equipamento_saude_ubs_posto_centro"). NULL usa as completas.
 #   raio_m         raio de busca em metros.
 #   n_por_camada   limite de resultados por camada (NULL = todos dentro do raio).
 #   tipo_distancia métrica de distância (ver gs_tipos_distancia()).
@@ -236,7 +238,14 @@ gs_servicos_proximos_impl <- function(cep = NULL, coordenadas = NULL,
   }
   camadas <- resolvidas$resolvidas
   if (length(camadas) == 0) {
+    dica_recortes <- if (any(grepl("__filtro_", gs_camadas_local(dir), fixed = TRUE))) {
+      paste0("Os recortes filtrados (__filtro_) exigem o nome completo em `camadas`. ",
+             "Eles não entram na seleção por tema, trecho do nome ou todas. ")
+    } else {
+      ""
+    }
     stop("Nenhuma camada válida em data/ para os valores informados. ",
+         dica_recortes,
          "Use gs_listar_servicos() para ver o que está disponível.")
   }
 

@@ -131,8 +131,13 @@ gs_listar_servicos_impl <- function(termo = NULL, dir = gs_caminho_dados()) {
     cat(paste0("   ", temas[[t]]), sep = "\n")
     cat("\n")
   }
-  cat("💡 Também funciona passar só o tema (ex.: camadas = \"saude\") ",
+  cat("💡 Para camadas completas, também funciona passar só o tema ",
+      "(ex.: camadas = \"saude\") ",
       "ou um pedaço do nome (ex.: \"ubs\").\n", sep = "")
+  if (any(grepl("__filtro_", tab$camada, fixed = TRUE))) {
+    cat("💡 Os recortes filtrados (__filtro_) exigem seu nome completo em `camadas`; ",
+        "não entram na seleção por tema, trecho do nome ou todas.\n", sep = "")
+  }
   invisible(tab)
 }
 
