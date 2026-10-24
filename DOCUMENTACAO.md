@@ -450,9 +450,48 @@ gs_mapa_servicos(
 )
 ```
 
-Abra o arquivo HTML no navegador. Você poderá aproximar, afastar e clicar nos
-pontos para ver detalhes. Os mapas de fundo vêm de serviços externos e precisam
-de internet ao serem visualizados.
+Abra o mapa no navegador por HTTP local, conforme as instruções abaixo. Você
+poderá aproximar, afastar e clicar nos pontos para ver detalhes. Os mapas-base
+online precisam de internet: mesmo um HTML autocontido, com JavaScript e CSS
+embutidos, continua buscando os tiles nos serviços externos.
+
+#### Abrir mapas HTML por HTTP local
+
+Com Python 3 disponível, abra um terminal (fora do console R) na pasta do
+projeto e execute:
+
+```bash
+python3 -m http.server 8000 --bind 127.0.0.1 --directory mapas
+```
+
+Mantenha esse terminal aberto e acesse
+[http://127.0.0.1:8000/ubs_perto_de_mim.html](http://127.0.0.1:8000/ubs_perto_de_mim.html)
+no navegador. O servidor fica vinculado somente a `127.0.0.1` e serve a pasta
+`mapas`. Para encerrá-lo, pressione **Ctrl+C** no mesmo terminal.
+
+Se salvou o HTML em outra pasta, ajuste `--directory` e o nome do arquivo na
+URL. Se a porta 8000 estiver ocupada, escolha outra, como 8001, tanto no comando
+quanto na URL. Quando houver arquivos auxiliares, como uma pasta `*_files`,
+preserve seus caminhos relativos ao HTML; não mova apenas o arquivo principal.
+O comando usa o [servidor da biblioteca padrão do Python](https://docs.python.org/3/library/http.server.html#command-line-interface),
+sem instalar novos pacotes R, e se destina à visualização local.
+
+A [política de tiles do OpenStreetMap](https://operations.osmfoundation.org/policies/tiles/)
+exige `Referer` HTTP válido nas requisições de páginas web e atribuição visível.
+Abrir o HTML diretamente por `file://` não fornece esse `Referer` HTTP; usar a
+URL local permite ao navegador enviá-lo normalmente. Não é necessário
+personalizar `Referer` ou `User-Agent`, nem alterar o cache ou o provedor.
+
+#### Se o fundo não aparecer
+
+Na aba **Rede/Network** das ferramentas do navegador, diferencie as requisições:
+
+- Falhas nos arquivos JavaScript/CSS locais, como respostas 404, pedem revisão
+  da pasta servida e dos caminhos dos arquivos auxiliares.
+- Se os arquivos locais carregam, mas os tiles externos falham, confira a
+  conexão, o `Referer` enviado e a resposta do serviço, como 403, 429 ou erro de
+  conexão. HTTP local não garante disponibilidade nem resolve todo bloqueio.
+  Um fundo ausente, isoladamente, não comprova defeito na exportação.
 
 Também é possível pedir busca e mapa de uma vez:
 
@@ -800,7 +839,7 @@ coluna de precisão e valide a fonte apropriada.
 | Saída já existe | A função protege arquivos anteriores. | Escolha outro nome ou use `sobrescrever = TRUE` conscientemente. |
 | Análise não executada | Faltam pontos, pacote, área adequada ou a amostra foi truncada. | Leia a mensagem da análise; amplie o raio ou escolha uma análise básica. |
 | Rota por rede falhou | OSRM ou a rede está indisponível. | Tente novamente mais tarde ou use `geodesica`/`euclidiana`. |
-| Mapa HTML sem fundo | Os mapas de base são carregados da internet. | Abra com conexão ativa. |
+| Mapa HTML sem fundo | Pode haver erro em arquivos locais, falta de internet ou falha/restrição do serviço de tiles. | [Abra por HTTP local](#abrir-mapas-html-por-http-local) e confira separadamente os arquivos auxiliares e as requisições de tiles na aba Rede do navegador. |
 
 ## 🧪 Testar o kit
 
