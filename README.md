@@ -127,6 +127,11 @@ Abra `mapas/primeiro_mapa.png` e `saidas/primeiro_exemplo/relatorio_analises.md`
 Na próxima vez, escolha outro nome de pasta ou adicione `sobrescrever = TRUE`
 à chamada de `gs_salvar_analises()`.
 
+Para mapas interativos HTML, siga as instruções de
+[abertura por HTTP local](DOCUMENTACAO.md#abrir-mapas-html-por-http-local),
+com o servidor vinculado somente a `127.0.0.1`. Os mapas-base online precisam
+de internet; servir o HTML localmente não garante a disponibilidade dos tiles.
+
 ## Prefere usar um CEP?
 
 Depois de baixar ao menos uma camada, use um CEP no lugar das coordenadas:
